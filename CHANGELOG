@@ -1,4 +1,15 @@
 # Changelog
+## [0.3.1] - Unreleased
+### Bug fixes
+ - Reject embedded NUL bytes in interface names.
+ - Validate directly constructed attributes before emission, including known
+   types supplied through raw attributes and nested statistics.
+ - Reject oversized attribute lengths before the 16-bit field can truncate.
+ - Return decode errors for malformed unchecked attribute buffers and nonempty
+   flag or padding payloads.
+ - Check the complete message and output buffer before writing its payload.
+ - Document the remaining need for fallible validation and serialization APIs.
+
 ## [0.3.0] - 2026-10-21
 ### Breaking changes
  - api break: fix: encode L2TP_ATTR_DATA_SEQ as u8. (870c13d)

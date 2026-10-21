@@ -3,10 +3,14 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use netlink_packet_core::{
-    DecodeError, DefaultNla, Emitable, ErrorContext, Nla, NlaBuffer,
-    NlasIterator, Parseable, emit_i32, emit_u16, emit_u32, emit_u64, parse_i32,
-    parse_string, parse_u8, parse_u16, parse_u32, parse_u64,
+    DecodeError, DefaultNla, Emitable, ErrorContext, NLA_HEADER_SIZE,
+    NLA_TYPE_MASK, Nla, NlaBuffer, NlasIterator, Parseable, emit_i32, emit_u16,
+    emit_u32, emit_u64, parse_i32, parse_string, parse_u8, parse_u16,
+    parse_u32, parse_u64,
 };
+
+// nla_len includes the four-byte header but excludes alignment padding.
+const NLA_MAX_VALUE_LEN: usize = u16::MAX as usize - NLA_HEADER_SIZE;
 
 const L2TP_ATTR_PW_TYPE: u16 = 1;
 const L2TP_ATTR_ENCAP_TYPE: u16 = 2;
@@ -153,6 +157,12 @@ impl From<L2tpEncapType> for u16 {
     }
 }
 
+/// An L2TP attribute.
+///
+/// Public variants allow unchecked construction. Emitting an invalid cookie,
+/// interface name, or an attribute exceeding the netlink length limit panics.
+/// Use [`Self::cookie`], [`Self::peer_cookie`] and [`Self::if_name`] to check
+/// user input before constructing these attributes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum L2tpAttribute {
@@ -208,6 +218,42 @@ pub enum L2tpAttribute {
 }
 
 impl L2tpAttribute {
+    pub(crate) fn validate(&self) -> Result<(), DecodeError> {
+        match self {
+            Self::Cookie(value) => {
+                validate_cookie_len(value, "L2TP_ATTR_COOKIE")
+            }
+            Self::PeerCookie(value) => {
+                validate_cookie_len(value, "L2TP_ATTR_PEER_COOKIE")
+            }
+            Self::IfName(value) => validate_ifname(value),
+            Self::Stats(stats) => {
+                let mut len = 0usize;
+                for stat in stats {
+                    stat.validate()?;
+                    // Each child is bounded before calling buffer_len().
+                    len = len.checked_add(stat.buffer_len()).ok_or_else(
+                        || DecodeError::from("L2TP statistics length overflow"),
+                    )?;
+                    validate_nla_value_len(len)?;
+                }
+                Ok(())
+            }
+            Self::Other(attr) => {
+                validate_nla_value_len(attr.value_len())?;
+                // A raw attribute using a known type must obey the same
+                // validation as its typed counterpart.
+                if (1..=L2TP_ATTR_PAD).contains(&(attr.kind() & NLA_TYPE_MASK))
+                {
+                    let raw = raw_nla(attr);
+                    Self::parse(&NlaBuffer::new_checked(&raw)?)?.validate()?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Create a `L2TP_ATTR_COOKIE` attribute after checking its length.
     pub fn cookie(value: Vec<u8>) -> Result<Self, DecodeError> {
         validate_cookie_len(&value, "L2TP_ATTR_COOKIE")?;
@@ -220,7 +266,8 @@ impl L2tpAttribute {
         Ok(Self::PeerCookie(value))
     }
 
-    /// Create a `L2TP_ATTR_IFNAME` attribute after checking its length.
+    /// Create a `L2TP_ATTR_IFNAME` attribute after checking its byte length
+    /// and rejecting NUL bytes.
     pub fn if_name(value: impl Into<String>) -> Result<Self, DecodeError> {
         let value = value.into();
         validate_ifname(&value)?;
@@ -230,7 +277,7 @@ impl L2tpAttribute {
 
 impl Nla for L2tpAttribute {
     fn value_len(&self) -> usize {
-        match self {
+        let len = match self {
             Self::PwType(_)
             | Self::EncapType(_)
             | Self::Offset(_)
@@ -263,7 +310,9 @@ impl Nla for L2tpAttribute {
             Self::Stats(stats) => stats.as_slice().buffer_len(),
             Self::UdpZeroCsum6Tx | Self::UdpZeroCsum6Rx | Self::Pad => 0,
             Self::Other(attr) => attr.value_len(),
-        }
+        };
+        validate_nla_value_len(len).expect("invalid L2TP attribute length");
+        len
     }
 
     fn kind(&self) -> u16 {
@@ -308,6 +357,7 @@ impl Nla for L2tpAttribute {
     }
 
     fn emit_value(&self, buffer: &mut [u8]) {
+        self.validate().expect("invalid L2TP attribute");
         match self {
             Self::Offset(value)
             | Self::VlanId(value)
@@ -359,6 +409,7 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
     for L2tpAttribute
 {
     fn parse(buf: &NlaBuffer<&'a T>) -> Result<Self, DecodeError> {
+        buf.check_buffer_length()?;
         let payload = buf.value();
         Ok(match buf.kind() {
             L2TP_ATTR_PW_TYPE => Self::PwType(
@@ -459,9 +510,18 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
             L2TP_ATTR_IP6_DADDR => Self::Ip6Daddr(
                 parse_ipv6(payload).context("invalid L2TP_ATTR_IP6_DADDR")?,
             ),
-            L2TP_ATTR_UDP_ZERO_CSUM6_TX => Self::UdpZeroCsum6Tx,
-            L2TP_ATTR_UDP_ZERO_CSUM6_RX => Self::UdpZeroCsum6Rx,
-            L2TP_ATTR_PAD => Self::Pad,
+            L2TP_ATTR_UDP_ZERO_CSUM6_TX => {
+                validate_empty(payload, "L2TP_ATTR_UDP_ZERO_CSUM6_TX")?;
+                Self::UdpZeroCsum6Tx
+            }
+            L2TP_ATTR_UDP_ZERO_CSUM6_RX => {
+                validate_empty(payload, "L2TP_ATTR_UDP_ZERO_CSUM6_RX")?;
+                Self::UdpZeroCsum6Rx
+            }
+            L2TP_ATTR_PAD => {
+                validate_empty(payload, "L2TP_ATTR_PAD")?;
+                Self::Pad
+            }
             kind => Self::Other(
                 DefaultNla::parse(buf)
                     .context(format!("unknown L2TP NLA type {kind}"))?,
@@ -471,6 +531,9 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
 }
 
 /// A counter of the nested `L2TP_ATTR_STATS` attribute.
+///
+/// Emitting raw attributes with an invalid known payload or an oversized
+/// netlink length panics.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum L2tpStatsAttribute {
@@ -488,9 +551,24 @@ pub enum L2tpStatsAttribute {
     Other(DefaultNla),
 }
 
+impl L2tpStatsAttribute {
+    fn validate(&self) -> Result<(), DecodeError> {
+        if let Self::Other(attr) = self {
+            validate_nla_value_len(attr.value_len())?;
+            if (1..=L2TP_ATTR_RX_INVALID)
+                .contains(&(attr.kind() & NLA_TYPE_MASK))
+            {
+                let raw = raw_nla(attr);
+                Self::parse(&NlaBuffer::new_checked(&raw)?)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Nla for L2tpStatsAttribute {
     fn value_len(&self) -> usize {
-        match self {
+        let len = match self {
             Self::TxPackets(_)
             | Self::TxBytes(_)
             | Self::TxErrors(_)
@@ -503,7 +581,9 @@ impl Nla for L2tpStatsAttribute {
             | Self::RxInvalid(_) => 8,
             Self::Pad => 0,
             Self::Other(attr) => attr.value_len(),
-        }
+        };
+        validate_nla_value_len(len).expect("invalid L2TP statistics length");
+        len
     }
 
     fn kind(&self) -> u16 {
@@ -524,6 +604,7 @@ impl Nla for L2tpStatsAttribute {
     }
 
     fn emit_value(&self, buffer: &mut [u8]) {
+        self.validate().expect("invalid L2TP statistics attribute");
         match self {
             Self::TxPackets(value)
             | Self::TxBytes(value)
@@ -545,6 +626,7 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
     for L2tpStatsAttribute
 {
     fn parse(buf: &NlaBuffer<&'a T>) -> Result<Self, DecodeError> {
+        buf.check_buffer_length()?;
         let payload = buf.value();
         Ok(match buf.kind() {
             L2TP_ATTR_TX_PACKETS => Self::TxPackets(
@@ -580,7 +662,10 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
             L2TP_ATTR_RX_INVALID => Self::RxInvalid(
                 parse_u64(payload).context("invalid L2TP_ATTR_RX_INVALID")?,
             ),
-            L2TP_ATTR_STATS_PAD => Self::Pad,
+            L2TP_ATTR_STATS_PAD => {
+                validate_empty(payload, "L2TP_ATTR_STATS_PAD")?;
+                Self::Pad
+            }
             kind => Self::Other(
                 DefaultNla::parse(buf)
                     .context(format!("unknown L2TP stats NLA type {kind}"))?,
@@ -596,7 +681,9 @@ fn parse_ifname(payload: &[u8]) -> Result<String, DecodeError> {
 }
 
 fn validate_ifname(name: &str) -> Result<(), DecodeError> {
-    if name.len() > L2TP_IFNAME_MAX_LEN {
+    if name.as_bytes().contains(&0) {
+        Err(DecodeError::from("L2TP_ATTR_IFNAME contains a NUL byte"))
+    } else if name.len() > L2TP_IFNAME_MAX_LEN {
         Err(DecodeError::from(format!(
             "L2TP_ATTR_IFNAME is too long: {} > {} bytes",
             name.len(),
@@ -605,6 +692,38 @@ fn validate_ifname(name: &str) -> Result<(), DecodeError> {
     } else {
         Ok(())
     }
+}
+
+fn validate_nla_value_len(len: usize) -> Result<(), DecodeError> {
+    if len > NLA_MAX_VALUE_LEN {
+        Err(DecodeError::from(format!(
+            "L2TP attribute value is too long: {len} > {NLA_MAX_VALUE_LEN} \
+             bytes"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_empty(payload: &[u8], name: &str) -> Result<(), DecodeError> {
+    if payload.is_empty() {
+        Ok(())
+    } else {
+        Err(DecodeError::from(format!(
+            "{name} must have an empty payload"
+        )))
+    }
+}
+
+// Only called after checking the value length. Write the header explicitly
+// so raw attributes with flags are validated without changing those flags.
+fn raw_nla(attr: &DefaultNla) -> Vec<u8> {
+    let len = NLA_HEADER_SIZE + attr.value_len();
+    let mut raw = vec![0; len];
+    emit_u16(&mut raw[..2], len as u16).unwrap();
+    emit_u16(&mut raw[2..4], attr.kind()).unwrap();
+    attr.emit_value(&mut raw[NLA_HEADER_SIZE..]);
+    raw
 }
 
 fn parse_cookie(

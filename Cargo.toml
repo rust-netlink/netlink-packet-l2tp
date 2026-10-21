@@ -1,7 +1,10 @@
 [package]
 name = "netlink-packet-l2tp"
-version = "0.3.0"
-authors = ["Gris Ge <cnfourt@gmail.com>"]
+version = "0.3.1"
+authors = [
+    "Gris Ge <cnfourt@gmail.com>",
+    "metastable-void <mori@menhera.ad.jp>",
+]
 edition = "2024"
 rust-version = "1.89"
 repository = "https://github.com/rust-netlink/netlink-packet-l2tp"

@@ -100,6 +100,17 @@ impl GenlFamily for L2tpMessage {
 
 impl Emitable for L2tpMessage {
     fn emit(&self, buffer: &mut [u8]) {
+        // Validate the entire message before writing any attribute. Public
+        // enum variants can bypass the checked attribute constructors.
+        for attribute in &self.attributes {
+            attribute
+                .validate()
+                .expect("invalid L2TP message attribute");
+        }
+        assert!(
+            buffer.len() >= self.buffer_len(),
+            "L2TP buffer is too small"
+        );
         self.attributes.as_slice().emit(buffer)
     }
 

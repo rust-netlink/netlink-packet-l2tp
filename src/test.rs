@@ -3,7 +3,8 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use netlink_packet_core::{
-    Emitable, NlaBuffer, Parseable, ParseableParametrized, emit_u16,
+    DefaultNla, Emitable, Nla, NlaBuffer, Parseable, ParseableParametrized,
+    emit_u16,
 };
 use netlink_packet_generic::{GenlFamily, GenlHeader};
 use pretty_assertions::assert_eq;
@@ -589,6 +590,217 @@ fn test_parse_tunnel_delete_request() {
 #[test]
 fn test_family_name() {
     assert_eq!(L2tpMessage::family_name(), "l2tp");
+}
+
+#[test]
+fn test_ifname_rejects_nul_in_constructor_and_parser() {
+    for name in ["\0", "eth0\0suffix", "eth0\0"] {
+        assert!(L2tpAttribute::if_name(name).is_err());
+        let mut payload = name.as_bytes().to_vec();
+        payload.push(0);
+        let raw = emit_nla(8, &payload);
+        assert!(L2tpAttribute::parse(&NlaBuffer::new(&raw)).is_err());
+    }
+
+    // Keep accepting the unterminated strings supported in 0.3.0, and
+    // count UTF-8 names in bytes rather than characters.
+    for name in ["", "eth0", "éééééééx"] {
+        assert!(L2tpAttribute::if_name(name).is_ok());
+        for terminated in [false, true] {
+            let mut payload = name.as_bytes().to_vec();
+            if terminated {
+                payload.push(0);
+            }
+            let raw = emit_nla(8, &payload);
+            assert_eq!(
+                L2tpAttribute::parse(&NlaBuffer::new(&raw)).unwrap(),
+                L2tpAttribute::IfName(name.to_string())
+            );
+        }
+    }
+    assert!(L2tpAttribute::if_name("é".repeat(8)).is_err());
+}
+
+#[test]
+fn test_invalid_public_variants_are_rejected_before_message_writes() {
+    let invalid = vec![
+        L2tpAttribute::IfName("eth0\0suffix".to_string()),
+        L2tpAttribute::IfName("x".repeat(16)),
+        L2tpAttribute::Cookie(vec![0; 1]),
+        L2tpAttribute::PeerCookie(vec![0; 9]),
+        L2tpAttribute::Cookie(vec![0; 65536]),
+        L2tpAttribute::Other(DefaultNla::new(100, vec![0; 65532])),
+        L2tpAttribute::Stats(vec![L2tpStatsAttribute::Other(DefaultNla::new(
+            100,
+            vec![0; 65532],
+        ))]),
+        L2tpAttribute::Stats(vec![L2tpStatsAttribute::TxBytes(0); 5461]),
+        // Raw variants cannot bypass validation of known types.
+        L2tpAttribute::Other(DefaultNla::new(15, vec![0; 1])),
+        L2tpAttribute::Other(DefaultNla::new(8, b"eth0\0suffix\0".to_vec())),
+        L2tpAttribute::Stats(vec![L2tpStatsAttribute::Other(DefaultNla::new(
+            1,
+            vec![0; 1],
+        ))]),
+        L2tpAttribute::Other(DefaultNla::new(30, emit_nla(1, &[0]))),
+    ];
+    for attribute in invalid {
+        let message = L2tpMessage {
+            cmd: L2tpCmd::SessionCreate,
+            attributes: vec![L2tpAttribute::ConnId(1), attribute],
+        };
+        let mut buffer = vec![0xa5; 70000];
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                message.emit(&mut buffer)
+            }));
+        assert!(result.is_err(), "accepted invalid message: {message:?}");
+        assert!(buffer.iter().all(|byte| *byte == 0xa5));
+    }
+}
+
+#[test]
+fn test_direct_attribute_emission_rejects_invalid_variants() {
+    for attribute in [
+        L2tpAttribute::IfName("eth0\0suffix".to_string()),
+        L2tpAttribute::Cookie(vec![0; 3]),
+        L2tpAttribute::PeerCookie(vec![0; 5]),
+        L2tpAttribute::Other(DefaultNla::new(15, vec![0; 3])),
+    ] {
+        let result = std::panic::catch_unwind(|| {
+            let mut buffer = vec![0; attribute.buffer_len()];
+            attribute.emit(&mut buffer);
+        });
+        assert!(result.is_err());
+    }
+    let stat = L2tpStatsAttribute::Other(DefaultNla::new(9, vec![0]));
+    assert!(
+        std::panic::catch_unwind(|| {
+            stat.emit(&mut vec![0; stat.buffer_len()]);
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn test_attribute_length_limits_include_header_but_not_padding() {
+    for len in [65530, 65531] {
+        let attribute =
+            L2tpAttribute::Other(DefaultNla::new(100, vec![42; len]));
+        let mut raw = vec![0; attribute.buffer_len()];
+        attribute.emit(&mut raw);
+        assert_eq!(raw.len(), 65536);
+        assert_eq!(
+            L2tpAttribute::parse(&NlaBuffer::new_checked(&raw).unwrap())
+                .unwrap(),
+            attribute
+        );
+        let stat =
+            L2tpStatsAttribute::Other(DefaultNla::new(100, vec![42; len]));
+        stat.emit(&mut raw);
+        assert_eq!(
+            L2tpStatsAttribute::parse(&NlaBuffer::new(&raw)).unwrap(),
+            stat
+        );
+    }
+    for len in [65532, 65535, 65536] {
+        let attribute =
+            L2tpAttribute::Other(DefaultNla::new(100, vec![0; len]));
+        assert!(std::panic::catch_unwind(|| attribute.value_len()).is_err());
+        let stat =
+            L2tpStatsAttribute::Other(DefaultNla::new(100, vec![0; len]));
+        assert!(std::panic::catch_unwind(|| stat.value_len()).is_err());
+    }
+}
+
+#[test]
+fn test_stats_length_limit_includes_aligned_children() {
+    for len in [65523, 65524, 65525, 65528] {
+        let attribute = L2tpAttribute::Stats(vec![L2tpStatsAttribute::Other(
+            DefaultNla::new(100, vec![42; len]),
+        )]);
+        if len <= 65524 {
+            let mut raw = vec![0; attribute.buffer_len()];
+            attribute.emit(&mut raw);
+            assert_eq!(raw.len(), 65532);
+            assert_eq!(
+                L2tpAttribute::parse(&NlaBuffer::new(&raw)).unwrap(),
+                attribute
+            );
+        } else {
+            assert!(
+                std::panic::catch_unwind(|| attribute.value_len()).is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn test_parsers_reject_unchecked_malformed_nla_headers_without_panicking() {
+    for raw in [
+        vec![],
+        vec![0],
+        vec![0; 3],
+        vec![3, 0, 1, 0],
+        vec![8, 0, 1, 0],
+    ] {
+        let nla = NlaBuffer::new(&raw);
+        assert!(L2tpAttribute::parse(&nla).is_err());
+        assert!(L2tpStatsAttribute::parse(&nla).is_err());
+    }
+}
+
+#[test]
+fn test_flags_and_padding_reject_nonempty_payloads() {
+    for kind in [33, 34, 35] {
+        let raw = emit_nla(kind, &[0]);
+        assert!(L2tpAttribute::parse(&NlaBuffer::new(&raw)).is_err());
+        let raw = emit_nla(kind, &[]);
+        assert!(L2tpAttribute::parse(&NlaBuffer::new(&raw)).is_ok());
+    }
+    let raw = emit_nla(9, &[0]);
+    assert!(L2tpStatsAttribute::parse(&NlaBuffer::new(&raw)).is_err());
+    let raw = emit_nla(9, &[]);
+    assert_eq!(
+        L2tpStatsAttribute::parse(&NlaBuffer::new(&raw)).unwrap(),
+        L2tpStatsAttribute::Pad
+    );
+}
+
+#[test]
+fn test_valid_raw_known_attributes_and_future_values_still_emit() {
+    for (kind, payload) in [
+        (15, vec![1; 4]),
+        (8, b"eth0\0".to_vec()),
+        (18, vec![2]),
+        (30, emit_nla(100, &[1, 2, 3])),
+        (100, vec![1, 2, 3]),
+    ] {
+        let attribute =
+            L2tpAttribute::Other(DefaultNla::new(kind, payload.clone()));
+        let mut raw = vec![0; attribute.buffer_len()];
+        attribute.emit(&mut raw);
+        assert_eq!(raw, emit_nla(kind, &payload));
+    }
+}
+
+#[test]
+fn test_short_message_output_buffer_is_rejected_before_writing() {
+    let message = L2tpMessage {
+        cmd: L2tpCmd::TunnelCreate,
+        attributes: vec![
+            L2tpAttribute::ConnId(1),
+            L2tpAttribute::PeerConnId(2),
+        ],
+    };
+    let mut buffer = vec![0xa5; message.buffer_len() - 1];
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            message.emit(&mut buffer);
+        }))
+        .is_err()
+    );
+    assert!(buffer.iter().all(|byte| *byte == 0xa5));
 }
 
 fn emit_nla(kind: u16, value: &[u8]) -> Vec<u8> {
