@@ -168,6 +168,12 @@ pub enum L2tpAttribute {
     PeerConnId(u32),
     SessionId(u32),
     PeerSessionId(u32),
+    /// UDP checksum state, `L2TP_ATTR_UDP_CSUM`.
+    ///
+    /// The kernel treats this attribute as a flag when creating a tunnel:
+    /// only its presence matters and any value, including 0, enables
+    /// checksums. Only add this attribute when enabling checksums. In dump
+    /// replies the kernel sends a u8 value of 0 or 1.
     UdpCsum(u8),
     VlanId(u16),
     Cookie(Vec<u8>),
@@ -178,6 +184,11 @@ pub enum L2tpAttribute {
     LnsMode(u8),
     UsingIpsec(u8),
     RecvTimeout(u64),
+    /// File descriptor of a managed tunnel socket, `L2TP_ATTR_FD`.
+    ///
+    /// The kernel netlink policy is `NLA_U32`, while the UAPI documents the
+    /// attribute as an `int`. The value is encoded as a 32-bit two's
+    /// complement integer.
     Fd(i32),
     IpSaddr(Ipv4Addr),
     IpDaddr(Ipv4Addr),
