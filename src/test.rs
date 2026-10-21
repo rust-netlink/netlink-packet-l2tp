@@ -201,6 +201,36 @@ fn test_parse_session_create_request() {
     );
 }
 
+// L2TP_ATTR_DATA_SEQ is unused by the kernel and is therefore never
+// present in an nlmon capture. The kernel netlink policy defines it as
+// NLA_U8 (net/l2tp/l2tp_netlink.c), so the attribute is built by hand.
+#[test]
+fn test_parse_data_seq_u8() {
+    let raw: Vec<u8> = vec![
+        0x07, 0x01, 0x00, 0x00, // genl header: session_modify, version 1
+        0x05, 0x00, 0x04, 0x00, 0x02, 0x00, 0x00, 0x00, // DATA_SEQ=2
+    ];
+
+    assert_parse_and_emit(
+        &raw,
+        &L2tpMessage {
+            cmd: L2tpCmd::SessionModify,
+            attributes: vec![L2tpAttribute::DataSeq(2)],
+        },
+    );
+}
+
+#[test]
+fn test_parse_data_seq_rejects_u16_payload() {
+    let raw: Vec<u8> = vec![
+        0x07, 0x01, 0x00, 0x00, // genl header: session_modify, version 1
+        0x06, 0x00, 0x04, 0x00, 0x01, 0x02, 0x00, 0x00, // 2-byte payload
+    ];
+
+    let header = GenlHeader::parse(&raw).unwrap();
+    assert!(L2tpMessage::parse_with_param(&raw[4..], header).is_err());
+}
+
 #[test]
 fn test_parse_tunnel_dump_request() {
     let raw: Vec<u8> = vec![0x04, 0x01, 0x00, 0x00];

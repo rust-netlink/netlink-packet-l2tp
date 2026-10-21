@@ -153,7 +153,7 @@ pub enum L2tpAttribute {
     PwType(L2tpPwType),
     EncapType(L2tpEncapType),
     Offset(u16),
-    DataSeq(u16),
+    DataSeq(u8),
     L2SpecType(u8),
     L2SpecLen(u8),
     ProtoVersion(u8),
@@ -196,13 +196,13 @@ impl Nla for L2tpAttribute {
             Self::PwType(_)
             | Self::EncapType(_)
             | Self::Offset(_)
-            | Self::DataSeq(_)
             | Self::VlanId(_)
             | Self::UdpSport(_)
             | Self::UdpDport(_)
             | Self::Mtu(_)
             | Self::Mru(_) => 2,
-            Self::L2SpecType(_)
+            Self::DataSeq(_)
+            | Self::L2SpecType(_)
             | Self::L2SpecLen(_)
             | Self::ProtoVersion(_)
             | Self::UdpCsum(_)
@@ -272,7 +272,6 @@ impl Nla for L2tpAttribute {
     fn emit_value(&self, buffer: &mut [u8]) {
         match self {
             Self::Offset(value)
-            | Self::DataSeq(value)
             | Self::VlanId(value)
             | Self::UdpSport(value)
             | Self::UdpDport(value)
@@ -282,7 +281,8 @@ impl Nla for L2tpAttribute {
             Self::EncapType(value) => {
                 emit_u16(buffer, (*value).into()).unwrap()
             }
-            Self::L2SpecType(value)
+            Self::DataSeq(value)
+            | Self::L2SpecType(value)
             | Self::L2SpecLen(value)
             | Self::ProtoVersion(value)
             | Self::UdpCsum(value)
@@ -337,7 +337,7 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
                 parse_u16(payload).context("invalid L2TP_ATTR_OFFSET")?,
             ),
             L2TP_ATTR_DATA_SEQ => Self::DataSeq(
-                parse_u16(payload).context("invalid L2TP_ATTR_DATA_SEQ")?,
+                parse_u8(payload).context("invalid L2TP_ATTR_DATA_SEQ")?,
             ),
             L2TP_ATTR_L2SPEC_TYPE => Self::L2SpecType(
                 parse_u8(payload).context("invalid L2TP_ATTR_L2SPEC_TYPE")?,
