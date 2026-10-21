@@ -59,6 +59,8 @@ const L2TP_ATTR_RX_INVALID: u16 = 11;
 /// A cookie is either absent or 4 or 8 bytes long, see
 /// `L2TP_ATTR_COOKIE` of the kernel.
 const L2TP_COOKIE_MAX_LEN: usize = 8;
+/// Maximum length of an interface name, `IFNAMSIZ - 1` of the kernel.
+const L2TP_IFNAME_MAX_LEN: usize = 15;
 
 /// L2TP control connection over UDP, `L2TP_ENCAPTYPE_UDP` of the kernel.
 /// Exposed through [L2tpEncapType::Udp], the raw value stays private.
@@ -205,6 +207,13 @@ impl L2tpAttribute {
     pub fn peer_cookie(value: Vec<u8>) -> Result<Self, DecodeError> {
         validate_cookie_len(&value, "L2TP_ATTR_PEER_COOKIE")?;
         Ok(Self::PeerCookie(value))
+    }
+
+    /// Create a `L2TP_ATTR_IFNAME` attribute after checking its length.
+    pub fn if_name(value: impl Into<String>) -> Result<Self, DecodeError> {
+        let value = value.into();
+        validate_ifname(&value)?;
+        Ok(Self::IfName(value))
     }
 }
 
@@ -366,9 +375,7 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
             L2TP_ATTR_PROTO_VERSION => Self::ProtoVersion(
                 parse_u8(payload).context("invalid L2TP_ATTR_PROTO_VERSION")?,
             ),
-            L2TP_ATTR_IFNAME => Self::IfName(
-                parse_string(payload).context("invalid L2TP_ATTR_IFNAME")?,
-            ),
+            L2TP_ATTR_IFNAME => Self::IfName(parse_ifname(payload)?),
             L2TP_ATTR_CONN_ID => Self::ConnId(
                 parse_u32(payload).context("invalid L2TP_ATTR_CONN_ID")?,
             ),
@@ -568,6 +575,24 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
                     .context(format!("unknown L2TP stats NLA type {kind}"))?,
             ),
         })
+    }
+}
+
+fn parse_ifname(payload: &[u8]) -> Result<String, DecodeError> {
+    let name = parse_string(payload).context("invalid L2TP_ATTR_IFNAME")?;
+    validate_ifname(&name)?;
+    Ok(name)
+}
+
+fn validate_ifname(name: &str) -> Result<(), DecodeError> {
+    if name.len() > L2TP_IFNAME_MAX_LEN {
+        Err(DecodeError::from(format!(
+            "L2TP_ATTR_IFNAME is too long: {} > {} bytes",
+            name.len(),
+            L2TP_IFNAME_MAX_LEN
+        )))
+    } else {
+        Ok(())
     }
 }
 
