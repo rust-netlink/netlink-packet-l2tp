@@ -1,27 +1,118 @@
 # Changelog
 ## [0.3.1] - Unreleased
+### Behaviour changes
+ - Emitting an invalid attribute now panics instead of producing a message
+   the kernel would reject. This covers interface names longer than 15 bytes
+   or containing NUL, cookies that are not 0, 4 or 8 bytes long, attributes
+   too long for the 16-bit netlink length field, and known attribute types
+   passed through `Other` with an invalid payload. Use the checked
+   constructors `L2tpAttribute::if_name`, `cookie` and `peer_cookie` for
+   user input.
+ - `L2tpMessage::emit` checks every attribute and the output buffer size
+   before writing anything, so a panic leaves the buffer untouched.
+
 ### Bug fixes
- - Reject embedded NUL bytes in interface names.
- - Validate directly constructed attributes before emission, including known
-   types supplied through raw attributes and nested statistics.
- - Reject oversized attribute lengths before the 16-bit field can truncate.
- - Return decode errors for malformed unchecked attribute buffers and nonempty
-   flag or padding payloads.
- - Check the complete message and output buffer before writing its payload.
- - Document the remaining need for fallible validation and serialization APIs.
+ - Parsing rejects interface names containing NUL bytes inside the name.
+   NUL padding after the name is still accepted.
+ - Parsing rejects nonempty payloads on flag and padding attributes.
+ - Parsing an unchecked attribute buffer with a malformed header returns an
+   error instead of panicking.
+ - Attribute lengths are checked before the 16-bit length field could
+   silently truncate them.
+ - Errors for invalid raw attributes name the offending attribute type.
+ - Each attribute is validated once per emission instead of repeatedly.
+
+### Documentation
+ - Document the validation rules and the remaining panicking APIs in the
+   README.
 
 ## [0.3.0] - 2026-10-21
+First release from https://github.com/rust-netlink/netlink-packet-l2tp, a
+rewrite of the crate. Changes below are relative to the published 0.2.0.
+
 ### Breaking changes
  - api break: fix: encode L2TP_ATTR_DATA_SEQ as u8. (870c13d)
+ - All public constants are removed (`L2TP_GENL_NAME`, `L2TP_GENL_VERSION`,
+   `L2TP_GENL_MCGROUP`, `L2TP_CMD_*`, `L2TP_ATTR_*`, `L2TP_PWTYPE_*`,
+   `L2TP_L2SPECTYPE_*`, `L2TP_ENCAPTYPE_*`, `L2TP_COOKIE_MAX_LEN` and
+   `L2TP_IFNAME_MAX_LEN`). Use the enums and their `From` conversions
+   instead.
+ - `L2tpStatsAttr` is renamed to `L2tpStatsAttribute`, and its `StatsPad`
+   variant to `Pad`.
+ - `L2tpL2SpecType` is removed; `L2tpAttribute::L2SpecType` holds a `u8`.
+ - `L2tpAttribute::UdpCsum`, `RecvSeq`, `SendSeq`, `LnsMode` and
+   `UsingIpsec` hold a `u8` instead of a `bool`, so values other than 0 and
+   1 survive a parse/emit round trip.
+ - `L2tpAttribute::Fd` holds an `i32` instead of `RawFd`.
+ - The per-command constructors `L2tpMessage::tunnel_create`,
+   `session_get` and so on are replaced by `L2tpMessage::new(cmd)`.
+ - Edition 2024 with a minimum supported Rust version of 1.89.
+ - Depends on `netlink-packet-core` 0.9 and `netlink-packet-generic` 0.5
+   instead of 0.8 and 0.4; the `libc` and `log` dependencies are dropped.
 
 ### New features
- - N/A
+ - `L2tpMessage::new(cmd)` creates a message without attributes.
 
 ### Bug fixes
+ - `L2TP_ATTR_STATS` is emitted without `NLA_F_NESTED`, matching the
+   kernel, which builds this attribute with `nla_nest_start_noflag()`.
+ - `L2TP_ATTR_FD` is encoded as a 32-bit two's complement integer: emitting
+   a negative value no longer panics, and parsing a value above `i32::MAX`
+   no longer fails.
  - docs: clarify UDP checksum and FD attribute semantics. (29ef892)
  - validate L2TP interface name length. (2a204d3)
  - validate L2TP cookie lengths. (ba969f5)
  - Enable GitHub CI. (2d876f5)
 
-## [0.1.0] - 2026-10-16
- - Initial release
+### Documentation
+ - README and crate docs include a usage example and point to the `nl-l2tp`
+   crate for talking to the kernel.
+
+## [0.2.0] - 2026-03-28
+Published from https://github.com/menhera-org/netlink-packet-l2tp; these
+changes are not part of this repository's history.
+
+### Breaking changes
+ - `L2tpAttribute::DataSeq` holds a `u16` instead of a `u8` and is encoded
+   as a 16-bit value. (Reverted in 0.3.0: the kernel policy is `NLA_U8`.)
+ - `L2tpAttribute::Fd` holds a `RawFd` instead of a `u32`. Emitting a
+   negative descriptor panics, and parsing a value above `i32::MAX` returns
+   an error.
+
+### New features
+ - N/A
+
+### Bug fixes
+ - Cookies must be 0, 4 or 8 bytes long, both in `L2tpAttribute::cookie` and
+   `peer_cookie` and when parsing. Previously any length up to 8 bytes was
+   accepted.
+ - Parsing `L2TP_ATTR_RECV_TIMEOUT` only accepts the 8-byte `u64` payload
+   the kernel sends. A 4-byte payload is now an error instead of being
+   widened.
+
+## [0.1.0] - 2026-03-28
+Initial release, published from
+https://github.com/menhera-org/netlink-packet-l2tp; not part of this
+repository's history.
+
+### New features
+ - `L2tpMessage`, the payload of the `l2tp` generic netlink family
+   (version 1), implementing `GenlFamily`, `Emitable` and
+   `ParseableParametrized<[u8], GenlHeader>`, with one constructor per
+   command (`tunnel_create`, `session_get`, ...).
+ - `L2tpCmd` covering every `L2TP_CMD_*` command, with `Other(u8)` for
+   unknown values.
+ - `L2tpAttribute` covering every `L2TP_ATTR_*` attribute, with
+   `Other(DefaultNla)` for unknown types. Boolean attributes such as
+   `UdpCsum`, `RecvSeq` and `LnsMode` use `bool`.
+ - `L2tpStatsAttr` for the nested `L2TP_ATTR_STATS` counters.
+ - `L2tpPwType`, `L2tpEncapType` and `L2tpL2SpecType` enums, each with an
+   `Other` variant for unknown values.
+ - Checked constructors `L2tpAttribute::if_name`, `cookie` and
+   `peer_cookie`, rejecting interface names over 15 bytes and cookies over
+   8 bytes. Parsing applies the same limits.
+ - Public constants for the family name, version, multicast group, and all
+   `L2TP_CMD_*`, `L2TP_ATTR_*`, `L2TP_PWTYPE_*`, `L2TP_L2SPECTYPE_*` and
+   `L2TP_ENCAPTYPE_*` values.
+ - `L2TP_ATTR_RECV_TIMEOUT` parsing accepts both 4-byte and 8-byte
+   payloads.

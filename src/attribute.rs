@@ -243,10 +243,12 @@ impl L2tpAttribute {
                 validate_nla_value_len(attr.value_len())?;
                 // A raw attribute using a known type must obey the same
                 // validation as its typed counterpart.
-                if (1..=L2TP_ATTR_PAD).contains(&(attr.kind() & NLA_TYPE_MASK))
-                {
+                let kind = attr.kind() & NLA_TYPE_MASK;
+                if (1..=L2TP_ATTR_PAD).contains(&kind) {
                     let raw = raw_nla(attr);
-                    Self::parse(&NlaBuffer::new_checked(&raw)?)?.validate()?;
+                    Self::parse(&NlaBuffer::new_checked(&raw)?)
+                        .and_then(|attr| attr.validate())
+                        .context(format!("invalid raw L2TP NLA type {kind}"))?;
                 }
                 Ok(())
             }
@@ -358,6 +360,12 @@ impl Nla for L2tpAttribute {
 
     fn emit_value(&self, buffer: &mut [u8]) {
         self.validate().expect("invalid L2TP attribute");
+        self.emit_validated_value(buffer)
+    }
+}
+
+impl EmitValidated for L2tpAttribute {
+    fn emit_validated_value(&self, buffer: &mut [u8]) {
         match self {
             Self::Offset(value)
             | Self::VlanId(value)
@@ -398,7 +406,7 @@ impl Nla for L2tpAttribute {
                 buffer[..name.len()].copy_from_slice(name.as_bytes());
                 buffer[name.len()] = 0;
             }
-            Self::Stats(stats) => stats.as_slice().emit(buffer),
+            Self::Stats(stats) => emit_validated(stats, buffer),
             Self::UdpZeroCsum6Tx | Self::UdpZeroCsum6Rx | Self::Pad => (),
             Self::Other(attr) => attr.emit_value(buffer),
         }
@@ -555,11 +563,12 @@ impl L2tpStatsAttribute {
     fn validate(&self) -> Result<(), DecodeError> {
         if let Self::Other(attr) = self {
             validate_nla_value_len(attr.value_len())?;
-            if (1..=L2TP_ATTR_RX_INVALID)
-                .contains(&(attr.kind() & NLA_TYPE_MASK))
-            {
+            let kind = attr.kind() & NLA_TYPE_MASK;
+            if (1..=L2TP_ATTR_RX_INVALID).contains(&kind) {
                 let raw = raw_nla(attr);
-                Self::parse(&NlaBuffer::new_checked(&raw)?)?;
+                Self::parse(&NlaBuffer::new_checked(&raw)?).context(
+                    format!("invalid raw L2TP stats NLA type {kind}"),
+                )?;
             }
         }
         Ok(())
@@ -605,6 +614,12 @@ impl Nla for L2tpStatsAttribute {
 
     fn emit_value(&self, buffer: &mut [u8]) {
         self.validate().expect("invalid L2TP statistics attribute");
+        self.emit_validated_value(buffer)
+    }
+}
+
+impl EmitValidated for L2tpStatsAttribute {
+    fn emit_validated_value(&self, buffer: &mut [u8]) {
         match self {
             Self::TxPackets(value)
             | Self::TxBytes(value)
@@ -675,7 +690,14 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
 }
 
 fn parse_ifname(payload: &[u8]) -> Result<String, DecodeError> {
-    let name = parse_string(payload).context("invalid L2TP_ATTR_IFNAME")?;
+    // The kernel accepts NUL padding after the name, so strip every
+    // trailing NUL and only reject NUL bytes inside the name.
+    let end = payload
+        .iter()
+        .rposition(|byte| *byte != 0)
+        .map_or(0, |i| i + 1);
+    let name =
+        parse_string(&payload[..end]).context("invalid L2TP_ATTR_IFNAME")?;
     validate_ifname(&name)?;
     Ok(name)
 }
@@ -691,6 +713,38 @@ fn validate_ifname(name: &str) -> Result<(), DecodeError> {
         )))
     } else {
         Ok(())
+    }
+}
+
+// Emits the value of an attribute the caller has already validated, so
+// message and nested emission do not repeat the checks of `emit_value`.
+pub(crate) trait EmitValidated: Nla {
+    fn emit_validated_value(&self, buffer: &mut [u8]);
+}
+
+struct Validated<'a, T>(&'a T);
+
+impl<T: EmitValidated> Nla for Validated<'_, T> {
+    fn value_len(&self) -> usize {
+        self.0.value_len()
+    }
+
+    fn kind(&self) -> u16 {
+        self.0.kind()
+    }
+
+    fn emit_value(&self, buffer: &mut [u8]) {
+        self.0.emit_validated_value(buffer)
+    }
+}
+
+/// Same as `<&[T] as Emitable>::emit`, skipping per-attribute validation.
+pub(crate) fn emit_validated<T: EmitValidated>(nlas: &[T], buffer: &mut [u8]) {
+    let mut start = 0;
+    for nla in nlas {
+        let end = start + nla.buffer_len();
+        Validated(nla).emit(&mut buffer[start..end]);
+        start = end;
     }
 }
 

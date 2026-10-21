@@ -596,6 +596,8 @@ fn test_family_name() {
 fn test_ifname_rejects_nul_in_constructor_and_parser() {
     for name in ["\0", "eth0\0suffix", "eth0\0"] {
         assert!(L2tpAttribute::if_name(name).is_err());
+    }
+    for name in ["\0suffix", "eth0\0suffix"] {
         let mut payload = name.as_bytes().to_vec();
         payload.push(0);
         let raw = emit_nla(8, &payload);
@@ -619,6 +621,37 @@ fn test_ifname_rejects_nul_in_constructor_and_parser() {
         }
     }
     assert!(L2tpAttribute::if_name("é".repeat(8)).is_err());
+}
+
+#[test]
+fn test_parse_ifname_accepts_nul_padding() {
+    for (payload, name) in [
+        (&b"eth0\0\0\0"[..], "eth0"),
+        (&b"\0\0"[..], ""),
+        (&b"xxxxxxxxxxxxxxx\0\0\0\0\0"[..], "xxxxxxxxxxxxxxx"),
+    ] {
+        let raw = emit_nla(8, payload);
+        assert_eq!(
+            L2tpAttribute::parse(&NlaBuffer::new(&raw)).unwrap(),
+            L2tpAttribute::IfName(name.to_string())
+        );
+    }
+}
+
+#[test]
+fn test_raw_known_attribute_errors_name_the_type() {
+    let attribute = L2tpAttribute::Other(DefaultNla::new(15, vec![0; 3]));
+    let error = attribute.validate().unwrap_err().to_string();
+    assert!(error.contains("invalid raw L2TP NLA type 15"), "{error}");
+
+    let attribute = L2tpAttribute::Stats(vec![L2tpStatsAttribute::Other(
+        DefaultNla::new(1, vec![0]),
+    )]);
+    let error = attribute.validate().unwrap_err().to_string();
+    assert!(
+        error.contains("invalid raw L2TP stats NLA type 1"),
+        "{error}"
+    );
 }
 
 #[test]

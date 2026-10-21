@@ -6,7 +6,7 @@ use netlink_packet_core::{
 };
 use netlink_packet_generic::{GenlFamily, GenlHeader};
 
-use crate::L2tpAttribute;
+use crate::{L2tpAttribute, attribute::emit_validated};
 
 // `L2TP_CMD_*` of the kernel, exposed through the `L2tpCmd` enum, the raw
 // values stay private.
@@ -111,7 +111,7 @@ impl Emitable for L2tpMessage {
             buffer.len() >= self.buffer_len(),
             "L2TP buffer is too small"
         );
-        self.attributes.as_slice().emit(buffer)
+        emit_validated(&self.attributes, buffer)
     }
 
     fn buffer_len(&self) -> usize {
