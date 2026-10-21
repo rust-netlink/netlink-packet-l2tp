@@ -56,6 +56,10 @@ const L2TP_ATTR_STATS_PAD: u16 = 9;
 const L2TP_ATTR_RX_COOKIE_DISCARDS: u16 = 10;
 const L2TP_ATTR_RX_INVALID: u16 = 11;
 
+/// A cookie is either absent or 4 or 8 bytes long, see
+/// `L2TP_ATTR_COOKIE` of the kernel.
+const L2TP_COOKIE_MAX_LEN: usize = 8;
+
 /// L2TP control connection over UDP, `L2TP_ENCAPTYPE_UDP` of the kernel.
 /// Exposed through [L2tpEncapType::Udp], the raw value stays private.
 const L2TP_ENCAPTYPE_UDP: u16 = 0;
@@ -188,6 +192,20 @@ pub enum L2tpAttribute {
     UdpZeroCsum6Rx,
     Pad,
     Other(DefaultNla),
+}
+
+impl L2tpAttribute {
+    /// Create a `L2TP_ATTR_COOKIE` attribute after checking its length.
+    pub fn cookie(value: Vec<u8>) -> Result<Self, DecodeError> {
+        validate_cookie_len(&value, "L2TP_ATTR_COOKIE")?;
+        Ok(Self::Cookie(value))
+    }
+
+    /// Create a `L2TP_ATTR_PEER_COOKIE` attribute after checking its length.
+    pub fn peer_cookie(value: Vec<u8>) -> Result<Self, DecodeError> {
+        validate_cookie_len(&value, "L2TP_ATTR_PEER_COOKIE")?;
+        Ok(Self::PeerCookie(value))
+    }
 }
 
 impl Nla for L2tpAttribute {
@@ -370,8 +388,13 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
             L2TP_ATTR_VLAN_ID => Self::VlanId(
                 parse_u16(payload).context("invalid L2TP_ATTR_VLAN_ID")?,
             ),
-            L2TP_ATTR_COOKIE => Self::Cookie(payload.to_vec()),
-            L2TP_ATTR_PEER_COOKIE => Self::PeerCookie(payload.to_vec()),
+            L2TP_ATTR_COOKIE => {
+                Self::Cookie(parse_cookie(payload, "L2TP_ATTR_COOKIE")?)
+            }
+            L2TP_ATTR_PEER_COOKIE => Self::PeerCookie(parse_cookie(
+                payload,
+                "L2TP_ATTR_PEER_COOKIE",
+            )?),
             L2TP_ATTR_DEBUG => Self::Debug(
                 parse_u32(payload).context("invalid L2TP_ATTR_DEBUG")?,
             ),
@@ -545,6 +568,26 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
                     .context(format!("unknown L2TP stats NLA type {kind}"))?,
             ),
         })
+    }
+}
+
+fn parse_cookie(
+    payload: &[u8],
+    attribute: &str,
+) -> Result<Vec<u8>, DecodeError> {
+    validate_cookie_len(payload, attribute)?;
+    Ok(payload.to_vec())
+}
+
+fn validate_cookie_len(
+    payload: &[u8],
+    attribute: &str,
+) -> Result<(), DecodeError> {
+    match payload.len() {
+        0 | 4 | L2TP_COOKIE_MAX_LEN => Ok(()),
+        len => Err(DecodeError::from(format!(
+            "{attribute} has invalid length {len}: must be 0, 4 or 8 bytes"
+        ))),
     }
 }
 

@@ -2,7 +2,9 @@
 
 use std::net::Ipv4Addr;
 
-use netlink_packet_core::{Emitable, ParseableParametrized};
+use netlink_packet_core::{
+    Emitable, NlaBuffer, Parseable, ParseableParametrized, emit_u16,
+};
 use netlink_packet_generic::{GenlFamily, GenlHeader};
 use pretty_assertions::assert_eq;
 
@@ -135,6 +137,91 @@ fn test_parse_session_dump_reply() {
             ],
         },
     );
+}
+
+// nlmon capture of the kernel dump reply to `ip l2tp show session` for the
+// session of `ip l2tp add session name l2tpeth0 tunnel_id 1000 session_id 5
+// peer_session_id 6 cookie 01020304 peer_cookie 0102030405060708 seq both`.
+#[test]
+fn test_parse_session_dump_reply_cookies() {
+    let raw: Vec<u8> = vec![
+        0x08, 0x01, 0x00, 0x00, 0x08, 0x00, 0x09, 0x00, 0xe8, 0x03, 0x00, 0x00,
+        0x08, 0x00, 0x0b, 0x00, 0x05, 0x00, 0x00, 0x00, 0x08, 0x00, 0x0a, 0x00,
+        0xd0, 0x07, 0x00, 0x00, 0x08, 0x00, 0x0c, 0x00, 0x06, 0x00, 0x00, 0x00,
+        0x08, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x01, 0x00,
+        0x05, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x08, 0x00, 0x6c, 0x32, 0x74, 0x70,
+        0x65, 0x74, 0x68, 0x30, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x0f, 0x00,
+        0x01, 0x02, 0x03, 0x04, 0x0c, 0x00, 0x10, 0x00, 0x01, 0x02, 0x03, 0x04,
+        0x05, 0x06, 0x07, 0x08, 0x05, 0x00, 0x12, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0x05, 0x00, 0x13, 0x00, 0x01, 0x00, 0x00, 0x00, 0x05, 0x00, 0x14, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x7c, 0x00, 0x1e, 0x00, 0x0c, 0x00, 0x01, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x02, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x03, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x04, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x05, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x06, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x0a, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x07, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x08, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x0b, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    assert_parse_and_emit(
+        &raw,
+        &L2tpMessage {
+            cmd: L2tpCmd::SessionGet,
+            attributes: vec![
+                L2tpAttribute::ConnId(1000),
+                L2tpAttribute::SessionId(5),
+                L2tpAttribute::PeerConnId(2000),
+                L2tpAttribute::PeerSessionId(6),
+                L2tpAttribute::Debug(0),
+                L2tpAttribute::PwType(L2tpPwType::Eth),
+                L2tpAttribute::IfName("l2tpeth0".to_string()),
+                L2tpAttribute::Cookie(vec![1, 2, 3, 4]),
+                L2tpAttribute::PeerCookie(vec![1, 2, 3, 4, 5, 6, 7, 8]),
+                L2tpAttribute::RecvSeq(1),
+                L2tpAttribute::SendSeq(1),
+                L2tpAttribute::LnsMode(0),
+                L2tpAttribute::Stats(zero_stats()),
+            ],
+        },
+    );
+}
+
+#[test]
+fn test_cookie_constructors_validate_length() {
+    assert!(L2tpAttribute::cookie(vec![]).is_ok());
+    assert!(L2tpAttribute::cookie(vec![0; 4]).is_ok());
+    assert!(L2tpAttribute::cookie(vec![0; 8]).is_ok());
+    assert!(L2tpAttribute::peer_cookie(vec![]).is_ok());
+    assert!(L2tpAttribute::peer_cookie(vec![0; 4]).is_ok());
+    assert!(L2tpAttribute::peer_cookie(vec![0; 8]).is_ok());
+
+    for len in [1, 2, 3, 5, 6, 7, 9] {
+        assert!(L2tpAttribute::cookie(vec![0; len]).is_err());
+        assert!(L2tpAttribute::peer_cookie(vec![0; len]).is_err());
+    }
+}
+
+#[test]
+fn test_parse_cookie_validates_length() {
+    for len in [0usize, 4, 8] {
+        for kind in [15u16, 16] {
+            let raw = emit_nla(kind, &vec![0; len]);
+            let nla = NlaBuffer::new_checked(&raw).unwrap();
+            assert!(L2tpAttribute::parse(&nla).is_ok());
+        }
+    }
+
+    for len in [1usize, 2, 3, 5, 6, 7, 9] {
+        for kind in [15u16, 16] {
+            let raw = emit_nla(kind, &vec![0; len]);
+            let nla = NlaBuffer::new_checked(&raw).unwrap();
+            assert!(L2tpAttribute::parse(&nla).is_err());
+        }
+    }
 }
 
 // nlmon capture of the request sent by `ip l2tp add tunnel tunnel_id 1000
@@ -282,4 +369,14 @@ fn test_parse_tunnel_delete_request() {
 #[test]
 fn test_family_name() {
     assert_eq!(L2tpMessage::family_name(), "l2tp");
+}
+
+fn emit_nla(kind: u16, value: &[u8]) -> Vec<u8> {
+    let len = 4 + value.len();
+    let aligned_len = (len + 3) & !3;
+    let mut raw = vec![0u8; aligned_len];
+    emit_u16(&mut raw[0..2], len as u16).unwrap();
+    emit_u16(&mut raw[2..4], kind).unwrap();
+    raw[4..(4 + value.len())].copy_from_slice(value);
+    raw
 }
