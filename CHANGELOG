@@ -1,5 +1,5 @@
 # Changelog
-## [0.3.1] - Unreleased
+## [0.3.1] - 2026-10-22
 ### Behaviour changes
  - Emitting an invalid attribute now panics instead of producing a message
    the kernel would reject. This covers invalid interface names (see below),
