@@ -6,9 +6,12 @@
  - `L2tpAttribute::if_name` takes `impl AsRef<[u8]>` instead of
    `impl Into<String>`. Callers passing a `char`, `Cow<str>`, `Box<str>` or
    `x.into()` can use `L2tpIfName::from_string` or `from_str_ref` instead.
- - Parsing `L2TP_ATTR_IFNAME` reads the payload up to the first NUL, as the
-   kernel does, and ignores the rest. 0.3.1 rejected payloads with bytes
-   after an embedded NUL.
+ - Parsing `L2TP_ATTR_IFNAME` follows the kernel's netlink policy: the
+   payload must fit `IFNAMSIZ` (16 bytes) including one trailing NUL, and
+   the name is read up to the first NUL, ignoring the rest. 0.3.1 rejected
+   payloads with bytes after an embedded NUL but accepted NUL padding of
+   any length. Raw `Other` attributes of this type are checked the same
+   way before emission.
 
 ### New features
  - `L2tpIfName`, a Linux interface name stored as the kernel's

@@ -626,17 +626,33 @@ fn test_parse_ifname_reads_a_c_string() {
         (&b"eth0\0\0\0"[..], "eth0"),
         (&b"eth0\0suffix\0"[..], "eth0"),
         (&b"l2tpeth%d\0\0"[..], "l2tpeth%d"),
-        (&b"xxxxxxxxxxxxxxx\0\0\0\0\0"[..], "xxxxxxxxxxxxxxx"),
+        (&b"eth0\0\0\0\0\0\0\0\0\0\0\0\0"[..], "eth0"),
+        (&b"xxxxxxxxxxxxxxx\0"[..], "xxxxxxxxxxxxxxx"),
     ] {
         let raw = emit_nla(8, payload);
         assert_eq!(
             L2tpAttribute::parse(&NlaBuffer::new(&raw)).unwrap(),
-            L2tpAttribute::if_name(name).unwrap()
+            L2tpAttribute::if_name(name).unwrap(),
+            "{}",
+            payload.escape_ascii()
         );
     }
-    for payload in [&b"\0\0"[..], b"\0suffix\0"] {
+    // The kernel's NLA_NUL_STRING policy limits the payload to IFNAMSIZ
+    // bytes including one trailing NUL, whatever the name before it.
+    for payload in [
+        &b"\0\0"[..],
+        b"\0suffix\0",
+        b"xxxxxxxxxxxxxxxx",
+        b"xxxxxxxxxxxxxxx\0\0",
+        b"eth0\0\0\0\0\0\0\0\0\0\0\0\0\0",
+        b"eth0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
+    ] {
         let raw = emit_nla(8, payload);
-        assert!(L2tpAttribute::parse(&NlaBuffer::new(&raw)).is_err());
+        assert!(
+            L2tpAttribute::parse(&NlaBuffer::new(&raw)).is_err(),
+            "{}",
+            payload.escape_ascii()
+        );
     }
 }
 
@@ -713,25 +729,32 @@ fn test_ifname_conversions() {
 
 #[test]
 fn test_invalid_public_variants_are_rejected_before_message_writes() {
-    let invalid = vec![
-        L2tpAttribute::Cookie(vec![0; 1]),
-        L2tpAttribute::PeerCookie(vec![0; 9]),
-        L2tpAttribute::Cookie(vec![0; 65536]),
-        L2tpAttribute::Other(DefaultNla::new(100, vec![0; 65532])),
-        L2tpAttribute::Stats(vec![L2tpStatsAttribute::Other(DefaultNla::new(
-            100,
-            vec![0; 65532],
-        ))]),
-        L2tpAttribute::Stats(vec![L2tpStatsAttribute::TxBytes(0); 5461]),
-        // Raw variants cannot bypass validation of known types.
-        L2tpAttribute::Other(DefaultNla::new(15, vec![0; 1])),
-        L2tpAttribute::Other(DefaultNla::new(8, b"a:b\0".to_vec())),
-        L2tpAttribute::Stats(vec![L2tpStatsAttribute::Other(DefaultNla::new(
-            1,
-            vec![0; 1],
-        ))]),
-        L2tpAttribute::Other(DefaultNla::new(30, emit_nla(1, &[0]))),
-    ];
+    let invalid =
+        vec![
+            L2tpAttribute::Cookie(vec![0; 1]),
+            L2tpAttribute::PeerCookie(vec![0; 9]),
+            L2tpAttribute::Cookie(vec![0; 65536]),
+            L2tpAttribute::Other(DefaultNla::new(100, vec![0; 65532])),
+            L2tpAttribute::Stats(vec![L2tpStatsAttribute::Other(
+                DefaultNla::new(100, vec![0; 65532]),
+            )]),
+            L2tpAttribute::Stats(vec![L2tpStatsAttribute::TxBytes(0); 5461]),
+            // Raw variants cannot bypass validation of known types.
+            L2tpAttribute::Other(DefaultNla::new(15, vec![0; 1])),
+            L2tpAttribute::Other(DefaultNla::new(8, b"a:b\0".to_vec())),
+            L2tpAttribute::Other(DefaultNla::new(
+                8,
+                b"xxxxxxxxxxxxxxx\0\0".to_vec(),
+            )),
+            L2tpAttribute::Other(DefaultNla::new(
+                8,
+                b"eth0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0".to_vec(),
+            )),
+            L2tpAttribute::Stats(vec![L2tpStatsAttribute::Other(
+                DefaultNla::new(1, vec![0; 1]),
+            )]),
+            L2tpAttribute::Other(DefaultNla::new(30, emit_nla(1, &[0]))),
+        ];
     for attribute in invalid {
         let message = L2tpMessage {
             cmd: L2tpCmd::SessionCreate,
@@ -859,6 +882,8 @@ fn test_valid_raw_known_attributes_and_future_values_still_emit() {
     for (kind, payload) in [
         (15, vec![1; 4]),
         (8, b"eth0\0".to_vec()),
+        (8, b"xxxxxxxxxxxxxxx\0".to_vec()),
+        (8, b"eth0\0\0\0\0\0\0\0\0\0\0\0\0".to_vec()),
         (18, vec![2]),
         (30, emit_nla(100, &[1, 2, 3])),
         (100, vec![1, 2, 3]),

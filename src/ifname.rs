@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT
 
-use std::{borrow::Cow, fmt, str::FromStr, str::Utf8Error};
+use std::{
+    borrow::Cow,
+    fmt,
+    str::{FromStr, Utf8Error},
+};
 
 use netlink_packet_core::DecodeError;
 
@@ -71,15 +75,23 @@ impl L2tpIfName {
             .unwrap_or(IFNAMSIZ)
     }
 
-    // The kernel reads `L2TP_ATTR_IFNAME` as a C string, ignoring anything
-    // after the first NUL. Unterminated payloads are accepted for
-    // compatibility with earlier releases.
+    // Parse the value of `L2TP_ATTR_IFNAME`. The kernel's netlink policy
+    // (`NLA_NUL_STRING` with `.len = IFNAMSIZ - 1`) rejects a payload longer
+    // than `IFNAMSIZ` including one trailing NUL, then reads the name as a C
+    // string, ignoring anything after the first NUL. Unterminated payloads
+    // are accepted for compatibility with earlier releases.
     pub(crate) fn parse(payload: &[u8]) -> Result<Self, DecodeError> {
-        let end = payload
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(payload.len());
-        Self::new(&payload[..end])
+        let len = payload
+            .strip_suffix(&[0])
+            .map_or(payload.len(), <[u8]>::len);
+        if len >= IFNAMSIZ {
+            return Err(DecodeError::from(format!(
+                "payload of {} bytes exceeds IFNAMSIZ ({IFNAMSIZ}) including \
+                 the NUL",
+                payload.len()
+            )));
+        }
+        Self::new(c_string(payload))
     }
 
     // Length of the attribute value, the name plus its terminating NUL.
@@ -121,6 +133,15 @@ fn validate(name: &[u8]) -> Result<(), DecodeError> {
 
 fn is_invalid_byte(byte: u8) -> bool {
     matches!(byte, 0 | b'/' | b':' | b'\t'..=b'\r' | b' ' | 0xa0)
+}
+
+// The bytes before the first NUL, or all of them if there is none.
+fn c_string(bytes: &[u8]) -> &[u8] {
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    &bytes[..end]
 }
 
 impl fmt::Debug for L2tpIfName {
@@ -201,6 +222,6 @@ impl TryFrom<[u8; IFNAMSIZ]> for L2tpIfName {
     type Error = DecodeError;
 
     fn try_from(buffer: [u8; IFNAMSIZ]) -> Result<Self, Self::Error> {
-        Self::parse(&buffer)
+        Self::new(c_string(&buffer))
     }
 }

@@ -7,6 +7,12 @@
 //! The L2TP generic netlink family is defined in
 //! `include/uapi/linux/l2tp.h` of the Linux kernel.
 //!
+//! This crate only defines the packets. To talk to the kernel, use the
+//! [`nl-l2tp`](https://crates.io/crates/nl-l2tp) crate, or the
+//! [`l2tp`](https://crates.io/crates/l2tp) crate, a high-level facade over
+//! this one that manages L2TP tunnels and sessions without exposing netlink
+//! messages.
+//!
 //! ```no_run
 //! use netlink_packet_l2tp::{
 //!     L2tpAttribute, L2tpCmd, L2tpEncapType, L2tpMessage,

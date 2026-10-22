@@ -5,7 +5,10 @@ L2TP generic netlink packet definitions for the
 
 This crate only parses and emits the netlink payload of the `l2tp` generic
 netlink family (`include/uapi/linux/l2tp.h` in the Linux kernel). To talk to
-the kernel, use the `nl-l2tp` crate.
+the kernel, use the [`nl-l2tp`](https://crates.io/crates/nl-l2tp) crate, or
+the [`l2tp`](https://crates.io/crates/l2tp) crate, a high-level facade over
+this one that manages L2TP tunnels and sessions without exposing netlink
+messages.
 
 ```rust,no_run
 use netlink_packet_l2tp::{
@@ -38,8 +41,10 @@ Every `L2tpIfName` satisfies the rules the kernel enforces: 1 to 15 bytes, not
 `dev_valid_name()`. The kernel's `isspace()` also matches byte 0xa0, so names
 containing characters such as `à` (UTF-8 `0xc3 0xa0`) are rejected too.
 
-When parsing, the name is the part of the payload before the first NUL, as
-the kernel reads it. Unterminated names are accepted for compatibility.
+When parsing, the payload must fit `IFNAMSIZ` (16 bytes) including one
+trailing NUL, as the kernel's netlink policy requires, and the name is the
+part of it before the first NUL, as the kernel reads it. Unterminated names
+are accepted for compatibility.
 
 ## Validation and unchecked values
 
