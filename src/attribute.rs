@@ -5,9 +5,10 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use netlink_packet_core::{
     DecodeError, DefaultNla, Emitable, ErrorContext, NLA_HEADER_SIZE,
     NLA_TYPE_MASK, Nla, NlaBuffer, NlasIterator, Parseable, emit_i32, emit_u16,
-    emit_u32, emit_u64, parse_i32, parse_string, parse_u8, parse_u16,
-    parse_u32, parse_u64,
+    emit_u32, emit_u64, parse_i32, parse_u8, parse_u16, parse_u32, parse_u64,
 };
+
+use crate::L2tpIfName;
 
 // nla_len includes the four-byte header but excludes alignment padding.
 const NLA_MAX_VALUE_LEN: usize = u16::MAX as usize - NLA_HEADER_SIZE;
@@ -63,8 +64,6 @@ const L2TP_ATTR_RX_INVALID: u16 = 11;
 /// A cookie is either absent or 4 or 8 bytes long, see
 /// `L2TP_ATTR_COOKIE` of the kernel.
 const L2TP_COOKIE_MAX_LEN: usize = 8;
-/// Maximum length of an interface name, `IFNAMSIZ - 1` of the kernel.
-const L2TP_IFNAME_MAX_LEN: usize = 15;
 
 /// L2TP control connection over UDP, `L2TP_ENCAPTYPE_UDP` of the kernel.
 /// Exposed through [L2tpEncapType::Udp], the raw value stays private.
@@ -159,10 +158,11 @@ impl From<L2tpEncapType> for u16 {
 
 /// An L2TP attribute.
 ///
-/// Public variants allow unchecked construction. Emitting an invalid cookie,
-/// interface name, or an attribute exceeding the netlink length limit panics.
-/// Use [`Self::cookie`], [`Self::peer_cookie`] and [`Self::if_name`] to check
-/// user input before constructing these attributes.
+/// Public variants allow unchecked construction. Emitting an invalid cookie
+/// or an attribute exceeding the netlink length limit panics. Use
+/// [`Self::cookie`] and [`Self::peer_cookie`] to check user input before
+/// constructing these attributes. Interface names are always valid, see
+/// [`L2tpIfName`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum L2tpAttribute {
@@ -173,7 +173,7 @@ pub enum L2tpAttribute {
     L2SpecType(u8),
     L2SpecLen(u8),
     ProtoVersion(u8),
-    IfName(String),
+    IfName(L2tpIfName),
     ConnId(u32),
     PeerConnId(u32),
     SessionId(u32),
@@ -226,7 +226,6 @@ impl L2tpAttribute {
             Self::PeerCookie(value) => {
                 validate_cookie_len(value, "L2TP_ATTR_PEER_COOKIE")
             }
-            Self::IfName(value) => validate_ifname(value),
             Self::Stats(stats) => {
                 let mut len = 0usize;
                 for stat in stats {
@@ -268,14 +267,9 @@ impl L2tpAttribute {
         Ok(Self::PeerCookie(value))
     }
 
-    /// Create a `L2TP_ATTR_IFNAME` attribute after checking it is a valid
-    /// Linux interface name: 1 to 15 bytes, not `.` or `..`, and free of
-    /// NUL, `/`, `:` and whitespace bytes (including 0xa0, as the kernel's
-    /// `isspace()` does).
-    pub fn if_name(value: impl Into<String>) -> Result<Self, DecodeError> {
-        let value = value.into();
-        validate_ifname(&value)?;
-        Ok(Self::IfName(value))
+    /// Create a `L2TP_ATTR_IFNAME` attribute, see [`L2tpIfName::new`].
+    pub fn if_name(name: impl AsRef<[u8]>) -> Result<Self, DecodeError> {
+        Ok(Self::IfName(L2tpIfName::new(name)?))
     }
 }
 
@@ -310,7 +304,7 @@ impl Nla for L2tpAttribute {
             Self::RecvTimeout(_) => 8,
             Self::Ip6Saddr(_) | Self::Ip6Daddr(_) => 16,
             Self::Cookie(cookie) | Self::PeerCookie(cookie) => cookie.len(),
-            Self::IfName(name) => name.len() + 1,
+            Self::IfName(name) => name.value_len(),
             Self::Stats(stats) => stats.as_slice().buffer_len(),
             Self::UdpZeroCsum6Tx | Self::UdpZeroCsum6Rx | Self::Pad => 0,
             Self::Other(attr) => attr.value_len(),
@@ -404,10 +398,7 @@ impl EmitValidated for L2tpAttribute {
             Self::Cookie(cookie) | Self::PeerCookie(cookie) => {
                 buffer.copy_from_slice(cookie)
             }
-            Self::IfName(name) => {
-                buffer[..name.len()].copy_from_slice(name.as_bytes());
-                buffer[name.len()] = 0;
-            }
+            Self::IfName(name) => name.emit(buffer),
             Self::Stats(stats) => emit_validated(stats, buffer),
             Self::UdpZeroCsum6Tx | Self::UdpZeroCsum6Rx | Self::Pad => (),
             Self::Other(attr) => attr.emit_value(buffer),
@@ -447,7 +438,10 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
             L2TP_ATTR_PROTO_VERSION => Self::ProtoVersion(
                 parse_u8(payload).context("invalid L2TP_ATTR_PROTO_VERSION")?,
             ),
-            L2TP_ATTR_IFNAME => Self::IfName(parse_ifname(payload)?),
+            L2TP_ATTR_IFNAME => Self::IfName(
+                L2tpIfName::parse(payload)
+                    .context("invalid L2TP_ATTR_IFNAME")?,
+            ),
             L2TP_ATTR_CONN_ID => Self::ConnId(
                 parse_u32(payload).context("invalid L2TP_ATTR_CONN_ID")?,
             ),
@@ -689,51 +683,6 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
             ),
         })
     }
-}
-
-fn parse_ifname(payload: &[u8]) -> Result<String, DecodeError> {
-    // The kernel accepts NUL padding after the name, so strip every
-    // trailing NUL and only reject NUL bytes inside the name.
-    let end = payload
-        .iter()
-        .rposition(|byte| *byte != 0)
-        .map_or(0, |i| i + 1);
-    let name =
-        parse_string(&payload[..end]).context("invalid L2TP_ATTR_IFNAME")?;
-    validate_ifname(&name)?;
-    Ok(name)
-}
-
-// Same rules as `dev_valid_name()` of the kernel, plus rejecting NUL bytes,
-// which would silently truncate the name.
-fn validate_ifname(name: &str) -> Result<(), DecodeError> {
-    let error = |reason: &str| {
-        Err(DecodeError::from(format!(
-            "invalid L2TP_ATTR_IFNAME {name:?}: {reason}"
-        )))
-    };
-    if name.is_empty() {
-        error("empty name")
-    } else if name.len() > L2TP_IFNAME_MAX_LEN {
-        error(&format!(
-            "too long: {} > {L2TP_IFNAME_MAX_LEN} bytes",
-            name.len()
-        ))
-    } else if name == "." || name == ".." {
-        error("reserved name")
-    } else if let Some(byte) =
-        name.bytes().find(|byte| is_invalid_ifname_byte(*byte))
-    {
-        error(&format!("contains invalid byte {byte:#04x}"))
-    } else {
-        Ok(())
-    }
-}
-
-// `isspace()` of the kernel also matches 0xa0 (Latin-1 NBSP), which occurs
-// inside UTF-8 sequences such as "à" (0xc3 0xa0).
-fn is_invalid_ifname_byte(byte: u8) -> bool {
-    matches!(byte, 0 | b'/' | b':' | b'\t'..=b'\r' | b' ' | 0xa0)
 }
 
 // Emits the value of an attribute the caller has already validated, so

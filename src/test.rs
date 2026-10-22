@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::{
+    borrow::Cow,
+    net::{Ipv4Addr, Ipv6Addr},
+};
 
 use netlink_packet_core::{
     DefaultNla, Emitable, Nla, NlaBuffer, Parseable, ParseableParametrized,
@@ -10,7 +13,7 @@ use netlink_packet_generic::{GenlFamily, GenlHeader};
 use pretty_assertions::assert_eq;
 
 use crate::{
-    L2tpAttribute, L2tpCmd, L2tpEncapType, L2tpMessage, L2tpPwType,
+    L2tpAttribute, L2tpCmd, L2tpEncapType, L2tpIfName, L2tpMessage, L2tpPwType,
     L2tpStatsAttribute,
 };
 
@@ -281,7 +284,7 @@ fn test_parse_session_dump_reply() {
                 L2tpAttribute::PeerSessionId(6),
                 L2tpAttribute::Debug(0),
                 L2tpAttribute::PwType(L2tpPwType::Eth),
-                L2tpAttribute::IfName("l2tpeth0".to_string()),
+                L2tpAttribute::if_name("l2tpeth0").unwrap(),
                 L2tpAttribute::RecvSeq(0),
                 L2tpAttribute::SendSeq(0),
                 L2tpAttribute::LnsMode(0),
@@ -330,7 +333,7 @@ fn test_parse_session_dump_reply_cookies() {
                 L2tpAttribute::PeerSessionId(6),
                 L2tpAttribute::Debug(0),
                 L2tpAttribute::PwType(L2tpPwType::Eth),
-                L2tpAttribute::IfName("l2tpeth0".to_string()),
+                L2tpAttribute::if_name("l2tpeth0").unwrap(),
                 L2tpAttribute::Cookie(vec![1, 2, 3, 4]),
                 L2tpAttribute::PeerCookie(vec![1, 2, 3, 4, 5, 6, 7, 8]),
                 L2tpAttribute::RecvSeq(1),
@@ -413,7 +416,7 @@ fn test_parse_session_dump_reply_ipv6() {
                 L2tpAttribute::PeerSessionId(8),
                 L2tpAttribute::Debug(0),
                 L2tpAttribute::PwType(L2tpPwType::Eth),
-                L2tpAttribute::IfName("l2tpeth6".to_string()),
+                L2tpAttribute::if_name("l2tpeth6").unwrap(),
                 L2tpAttribute::RecvSeq(0),
                 L2tpAttribute::SendSeq(0),
                 L2tpAttribute::LnsMode(0),
@@ -503,7 +506,7 @@ fn test_parse_session_create_request() {
                 L2tpAttribute::PwType(L2tpPwType::Eth),
                 L2tpAttribute::L2SpecType(1),
                 L2tpAttribute::L2SpecLen(4),
-                L2tpAttribute::IfName("l2tpeth0".to_string()),
+                L2tpAttribute::if_name("l2tpeth0").unwrap(),
             ],
         },
     );
@@ -593,21 +596,17 @@ fn test_family_name() {
 }
 
 #[test]
-fn test_ifname_rejects_nul_in_constructor_and_parser() {
+fn test_ifname_rejects_nul_in_constructor() {
     for name in ["\0", "eth0\0suffix", "eth0\0"] {
         assert!(L2tpAttribute::if_name(name).is_err());
     }
-    for name in ["\0suffix", "eth0\0suffix"] {
-        let mut payload = name.as_bytes().to_vec();
-        payload.push(0);
-        let raw = emit_nla(8, &payload);
-        assert!(L2tpAttribute::parse(&NlaBuffer::new(&raw)).is_err());
-    }
+}
 
+#[test]
+fn test_parse_ifname_reads_a_c_string() {
     // Keep accepting the unterminated strings supported in 0.3.0, and
     // count UTF-8 names in bytes rather than characters.
     for name in ["eth0", "éééééééx"] {
-        assert!(L2tpAttribute::if_name(name).is_ok());
         for terminated in [false, true] {
             let mut payload = name.as_bytes().to_vec();
             if terminated {
@@ -616,29 +615,29 @@ fn test_ifname_rejects_nul_in_constructor_and_parser() {
             let raw = emit_nla(8, &payload);
             assert_eq!(
                 L2tpAttribute::parse(&NlaBuffer::new(&raw)).unwrap(),
-                L2tpAttribute::IfName(name.to_string())
+                L2tpAttribute::if_name(name).unwrap()
             );
         }
     }
     assert!(L2tpAttribute::if_name("é".repeat(8)).is_err());
-}
 
-#[test]
-fn test_parse_ifname_accepts_nul_padding() {
+    // Like the kernel, ignore everything after the first NUL.
     for (payload, name) in [
         (&b"eth0\0\0\0"[..], "eth0"),
+        (&b"eth0\0suffix\0"[..], "eth0"),
         (&b"l2tpeth%d\0\0"[..], "l2tpeth%d"),
         (&b"xxxxxxxxxxxxxxx\0\0\0\0\0"[..], "xxxxxxxxxxxxxxx"),
     ] {
         let raw = emit_nla(8, payload);
         assert_eq!(
             L2tpAttribute::parse(&NlaBuffer::new(&raw)).unwrap(),
-            L2tpAttribute::IfName(name.to_string())
+            L2tpAttribute::if_name(name).unwrap()
         );
     }
-    // Padding alone leaves an empty name.
-    let raw = emit_nla(8, b"\0\0");
-    assert!(L2tpAttribute::parse(&NlaBuffer::new(&raw)).is_err());
+    for payload in [&b"\0\0"[..], b"\0suffix\0"] {
+        let raw = emit_nla(8, payload);
+        assert!(L2tpAttribute::parse(&NlaBuffer::new(&raw)).is_err());
+    }
 }
 
 #[test]
@@ -656,38 +655,65 @@ fn test_ifname_follows_kernel_dev_valid_name() {
             L2tpAttribute::parse(&NlaBuffer::new(&raw)).is_err(),
             "{name:?}"
         );
-        let attribute = L2tpAttribute::IfName(name.to_string());
-        assert!(
-            std::panic::catch_unwind(|| {
-                attribute.emit(&mut vec![0; attribute.buffer_len()])
-            })
-            .is_err(),
-            "{name:?}"
-        );
     }
 }
 
 #[test]
-fn test_raw_known_attribute_errors_name_the_type() {
-    let attribute = L2tpAttribute::Other(DefaultNla::new(15, vec![0; 3]));
-    let error = attribute.validate().unwrap_err().to_string();
-    assert!(error.contains("invalid raw L2TP NLA type 15"), "{error}");
+fn test_ifname_supports_non_utf8_names() {
+    let name = L2tpIfName::new(b"eth\xff").unwrap();
+    assert_eq!(name.as_bytes(), b"eth\xff");
+    assert!(name.to_str().is_err());
+    assert_eq!(name.to_string(), "eth\u{fffd}");
+    assert_eq!(format!("{name:?}"), r#"L2tpIfName("eth\xff")"#);
 
-    let attribute = L2tpAttribute::Stats(vec![L2tpStatsAttribute::Other(
-        DefaultNla::new(1, vec![0]),
-    )]);
-    let error = attribute.validate().unwrap_err().to_string();
-    assert!(
-        error.contains("invalid raw L2TP stats NLA type 1"),
-        "{error}"
+    let attribute = L2tpAttribute::IfName(name);
+    let mut raw = vec![0; attribute.buffer_len()];
+    attribute.emit(&mut raw);
+    assert_eq!(raw, emit_nla(8, b"eth\xff\0"));
+    assert_eq!(
+        L2tpAttribute::parse(&NlaBuffer::new(&raw)).unwrap(),
+        attribute
     );
+}
+
+#[test]
+fn test_ifname_conversions() {
+    let eth0 = L2tpIfName::new("eth0").unwrap();
+    assert_eq!(eth0.as_bytes(), b"eth0");
+    assert_eq!(eth0.to_str().unwrap(), "eth0");
+    assert_eq!(eth0.as_array(), b"eth0\0\0\0\0\0\0\0\0\0\0\0\0");
+    assert_eq!(<[u8; 16]>::from(eth0), *b"eth0\0\0\0\0\0\0\0\0\0\0\0\0");
+
+    let string = "eth0".to_string();
+    assert_eq!(L2tpIfName::try_from("eth0").unwrap(), eth0);
+    assert_eq!(L2tpIfName::try_from(&string).unwrap(), eth0);
+    assert_eq!(L2tpIfName::try_from(string.clone()).unwrap(), eth0);
+    assert_eq!(L2tpIfName::try_from(&b"eth0"[..]).unwrap(), eth0);
+    assert_eq!(L2tpIfName::try_from(b"eth0".to_vec()).unwrap(), eth0);
+    assert_eq!("eth0".parse::<L2tpIfName>().unwrap(), eth0);
+    assert_eq!(
+        L2tpIfName::from_str_ref(Cow::Borrowed("eth0")).unwrap(),
+        eth0
+    );
+    assert_eq!(
+        L2tpIfName::from_str_ref(Box::<str>::from("eth0")).unwrap(),
+        eth0
+    );
+    assert_eq!(L2tpIfName::from_string(string).unwrap(), eth0);
+    assert_eq!(L2tpIfName::from_string('x').unwrap().as_bytes(), b"x");
+
+    // Bytes after the first NUL are dropped, so equal names compare equal.
+    let mut buffer = *b"eth0\0garbage\0\0\0\0";
+    assert_eq!(L2tpIfName::try_from(buffer).unwrap(), eth0);
+    buffer = [b'x'; 16];
+    assert!(L2tpIfName::try_from(buffer).is_err());
+    buffer[15] = 0;
+    assert_eq!(L2tpIfName::try_from(buffer).unwrap().as_bytes(), [b'x'; 15]);
 }
 
 #[test]
 fn test_invalid_public_variants_are_rejected_before_message_writes() {
     let invalid = vec![
-        L2tpAttribute::IfName("eth0\0suffix".to_string()),
-        L2tpAttribute::IfName("x".repeat(16)),
         L2tpAttribute::Cookie(vec![0; 1]),
         L2tpAttribute::PeerCookie(vec![0; 9]),
         L2tpAttribute::Cookie(vec![0; 65536]),
@@ -699,7 +725,7 @@ fn test_invalid_public_variants_are_rejected_before_message_writes() {
         L2tpAttribute::Stats(vec![L2tpStatsAttribute::TxBytes(0); 5461]),
         // Raw variants cannot bypass validation of known types.
         L2tpAttribute::Other(DefaultNla::new(15, vec![0; 1])),
-        L2tpAttribute::Other(DefaultNla::new(8, b"eth0\0suffix\0".to_vec())),
+        L2tpAttribute::Other(DefaultNla::new(8, b"a:b\0".to_vec())),
         L2tpAttribute::Stats(vec![L2tpStatsAttribute::Other(DefaultNla::new(
             1,
             vec![0; 1],
@@ -724,7 +750,6 @@ fn test_invalid_public_variants_are_rejected_before_message_writes() {
 #[test]
 fn test_direct_attribute_emission_rejects_invalid_variants() {
     for attribute in [
-        L2tpAttribute::IfName("eth0\0suffix".to_string()),
         L2tpAttribute::Cookie(vec![0; 3]),
         L2tpAttribute::PeerCookie(vec![0; 5]),
         L2tpAttribute::Other(DefaultNla::new(15, vec![0; 3])),

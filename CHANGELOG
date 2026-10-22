@@ -1,4 +1,32 @@
 # Changelog
+## [0.4.0] - Unreleased
+### Breaking changes
+ - `L2tpAttribute::IfName` holds the new `L2tpIfName` instead of a `String`.
+   No public API uses `String` for interface names any more.
+ - `L2tpAttribute::if_name` takes `impl AsRef<[u8]>` instead of
+   `impl Into<String>`. Callers passing a `char`, `Cow<str>`, `Box<str>` or
+   `x.into()` can use `L2tpIfName::from_string` or `from_str_ref` instead.
+ - Parsing `L2TP_ATTR_IFNAME` reads the payload up to the first NUL, as the
+   kernel does, and ignores the rest. 0.3.1 rejected payloads with bytes
+   after an embedded NUL.
+
+### New features
+ - `L2tpIfName`, a Linux interface name stored as the kernel's
+   `char[IFNAMSIZ]` (`[u8; 16]`). Names need not be valid UTF-8, so
+   interfaces with such names can be represented and parsed.
+ - `L2tpIfName` is always valid: constructors apply the kernel's checks
+   (1 to 15 bytes, and the `dev_valid_name()` rules), so emitting an
+   interface name never panics.
+ - Conversions: `L2tpIfName::new(impl AsRef<[u8]>)`,
+   `from_str_ref(impl AsRef<str>)`, `from_string(impl Into<String>)`,
+   `FromStr`, and `TryFrom` for `&str`, `String`, `&String`, `&[u8]`,
+   `Vec<u8>` and `[u8; 16]`.
+ - Accessors: `as_bytes()`, `as_array()`, `to_str()`, `to_string_lossy()`,
+   `Display` (lossy), `AsRef<[u8]>` and `From<L2tpIfName> for [u8; 16]`.
+
+### Bug fixes
+ - N/A
+
 ## [0.3.1] - 2026-10-22
 ### Behaviour changes
  - Emitting an invalid attribute now panics instead of producing a message
@@ -30,8 +58,6 @@
 ### Documentation
  - Document the validation rules and the remaining panicking APIs in the
    README.
- - Note that storing interface names as `[u8; 16]`, to support names that
-   are not valid UTF-8, is deferred to 0.4.0.
 
 ## [0.3.0] - 2026-10-21
 First release from https://github.com/rust-netlink/netlink-packet-l2tp, a

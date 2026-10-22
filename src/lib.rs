@@ -24,6 +24,7 @@
 //! ```
 
 mod attribute;
+mod ifname;
 mod message;
 #[cfg(test)]
 mod test;
@@ -31,4 +32,5 @@ mod test;
 pub use attribute::{
     L2tpAttribute, L2tpEncapType, L2tpPwType, L2tpStatsAttribute,
 };
+pub use ifname::L2tpIfName;
 pub use message::{L2tpCmd, L2tpMessage};
