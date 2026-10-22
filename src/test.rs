@@ -425,7 +425,7 @@ fn test_parse_session_dump_reply_ipv6() {
 
 #[test]
 fn test_ifname_constructor_validate_length() {
-    assert!(L2tpAttribute::if_name("").is_ok());
+    assert!(L2tpAttribute::if_name("x").is_ok());
     assert!(L2tpAttribute::if_name("x".repeat(15)).is_ok());
     assert!(L2tpAttribute::if_name("x".repeat(16)).is_err());
 }
@@ -606,7 +606,7 @@ fn test_ifname_rejects_nul_in_constructor_and_parser() {
 
     // Keep accepting the unterminated strings supported in 0.3.0, and
     // count UTF-8 names in bytes rather than characters.
-    for name in ["", "eth0", "éééééééx"] {
+    for name in ["eth0", "éééééééx"] {
         assert!(L2tpAttribute::if_name(name).is_ok());
         for terminated in [false, true] {
             let mut payload = name.as_bytes().to_vec();
@@ -627,13 +627,42 @@ fn test_ifname_rejects_nul_in_constructor_and_parser() {
 fn test_parse_ifname_accepts_nul_padding() {
     for (payload, name) in [
         (&b"eth0\0\0\0"[..], "eth0"),
-        (&b"\0\0"[..], ""),
+        (&b"l2tpeth%d\0\0"[..], "l2tpeth%d"),
         (&b"xxxxxxxxxxxxxxx\0\0\0\0\0"[..], "xxxxxxxxxxxxxxx"),
     ] {
         let raw = emit_nla(8, payload);
         assert_eq!(
             L2tpAttribute::parse(&NlaBuffer::new(&raw)).unwrap(),
             L2tpAttribute::IfName(name.to_string())
+        );
+    }
+    // Padding alone leaves an empty name.
+    let raw = emit_nla(8, b"\0\0");
+    assert!(L2tpAttribute::parse(&NlaBuffer::new(&raw)).is_err());
+}
+
+#[test]
+fn test_ifname_follows_kernel_dev_valid_name() {
+    for name in ["eth0", "l2tpeth%d", "a.b", "...", "é", "-_+@"] {
+        assert!(L2tpAttribute::if_name(name).is_ok(), "{name:?}");
+    }
+    for name in [
+        "", ".", "..", "a/b", "a:b", "a b", "a\tb", "a\nb", "a\x0bb", "a\x0cb",
+        "a\rb", "a\u{a0}b", "à",
+    ] {
+        assert!(L2tpAttribute::if_name(name).is_err(), "{name:?}");
+        let raw = emit_nla(8, name.as_bytes());
+        assert!(
+            L2tpAttribute::parse(&NlaBuffer::new(&raw)).is_err(),
+            "{name:?}"
+        );
+        let attribute = L2tpAttribute::IfName(name.to_string());
+        assert!(
+            std::panic::catch_unwind(|| {
+                attribute.emit(&mut vec![0; attribute.buffer_len()])
+            })
+            .is_err(),
+            "{name:?}"
         );
     }
 }

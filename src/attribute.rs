@@ -268,8 +268,10 @@ impl L2tpAttribute {
         Ok(Self::PeerCookie(value))
     }
 
-    /// Create a `L2TP_ATTR_IFNAME` attribute after checking its byte length
-    /// and rejecting NUL bytes.
+    /// Create a `L2TP_ATTR_IFNAME` attribute after checking it is a valid
+    /// Linux interface name: 1 to 15 bytes, not `.` or `..`, and free of
+    /// NUL, `/`, `:` and whitespace bytes (including 0xa0, as the kernel's
+    /// `isspace()` does).
     pub fn if_name(value: impl Into<String>) -> Result<Self, DecodeError> {
         let value = value.into();
         validate_ifname(&value)?;
@@ -702,18 +704,36 @@ fn parse_ifname(payload: &[u8]) -> Result<String, DecodeError> {
     Ok(name)
 }
 
+// Same rules as `dev_valid_name()` of the kernel, plus rejecting NUL bytes,
+// which would silently truncate the name.
 fn validate_ifname(name: &str) -> Result<(), DecodeError> {
-    if name.as_bytes().contains(&0) {
-        Err(DecodeError::from("L2TP_ATTR_IFNAME contains a NUL byte"))
-    } else if name.len() > L2TP_IFNAME_MAX_LEN {
+    let error = |reason: &str| {
         Err(DecodeError::from(format!(
-            "L2TP_ATTR_IFNAME is too long: {} > {} bytes",
-            name.len(),
-            L2TP_IFNAME_MAX_LEN
+            "invalid L2TP_ATTR_IFNAME {name:?}: {reason}"
         )))
+    };
+    if name.is_empty() {
+        error("empty name")
+    } else if name.len() > L2TP_IFNAME_MAX_LEN {
+        error(&format!(
+            "too long: {} > {L2TP_IFNAME_MAX_LEN} bytes",
+            name.len()
+        ))
+    } else if name == "." || name == ".." {
+        error("reserved name")
+    } else if let Some(byte) =
+        name.bytes().find(|byte| is_invalid_ifname_byte(*byte))
+    {
+        error(&format!("contains invalid byte {byte:#04x}"))
     } else {
         Ok(())
     }
+}
+
+// `isspace()` of the kernel also matches 0xa0 (Latin-1 NBSP), which occurs
+// inside UTF-8 sequences such as "à" (0xc3 0xa0).
+fn is_invalid_ifname_byte(byte: u8) -> bool {
+    matches!(byte, 0 | b'/' | b':' | b'\t'..=b'\r' | b' ' | 0xa0)
 }
 
 // Emits the value of an attribute the caller has already validated, so

@@ -27,8 +27,12 @@ let message = L2tpMessage {
 
 Use `L2tpAttribute::if_name`, `L2tpAttribute::cookie`, and
 `L2tpAttribute::peer_cookie` for user-provided values. These constructors return
-an error for interface names containing NUL bytes or more than 15 bytes, and
-for cookies whose length is neither 0, 4, nor 8 bytes.
+an error for cookies whose length is neither 0, 4, nor 8 bytes, and for
+interface names the kernel would reject. Interface names follow
+`dev_valid_name()` of the kernel: 1 to 15 bytes, not `.` or `..`, and free of
+NUL, `/`, `:` and whitespace bytes. The kernel's `isspace()` also matches byte
+0xa0, so names containing characters such as `à` (UTF-8 `0xc3 0xa0`) are
+rejected too.
 
 The public enum variants remain available for compatibility with 0.3.0.
 Constructing or mutating them directly bypasses the checked constructors.
@@ -48,9 +52,14 @@ emission buffers with `buffer_len()` only after bounding any directly supplied
 raw attributes or statistics collections. The existing `Emitable` and `Nla`
 trait methods remain infallible.
 
-Parsing rejects malformed attribute headers, embedded NUL bytes in interface
-names, and nonempty flag or padding payloads. For compatibility, interface
-names without a trailing NUL are still accepted. Unknown attributes and enum
+Also deferred to 0.4.0: `L2tpAttribute::IfName` holds a `String`, so interface
+names that are not valid UTF-8 cannot be represented, and parsing a message
+containing one fails. 0.4.0 will store interface names as `[u8; 16]`, the
+kernel's `IFNAMSIZ` buffer.
+
+Parsing rejects malformed attribute headers, invalid interface names, and
+nonempty flag or padding payloads. For compatibility, interface names without
+a trailing NUL are still accepted, as are names followed by NUL padding. Unknown attributes and enum
 values remain supported; validation does not impose command-specific kernel
 policy or check whether a socket file descriptor is open.
 

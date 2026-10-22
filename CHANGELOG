@@ -2,8 +2,8 @@
 ## [0.3.1] - Unreleased
 ### Behaviour changes
  - Emitting an invalid attribute now panics instead of producing a message
-   the kernel would reject. This covers interface names longer than 15 bytes
-   or containing NUL, cookies that are not 0, 4 or 8 bytes long, attributes
+   the kernel would reject. This covers invalid interface names (see below),
+   cookies that are not 0, 4 or 8 bytes long, attributes
    too long for the 16-bit netlink length field, and known attribute types
    passed through `Other` with an invalid payload. Use the checked
    constructors `L2tpAttribute::if_name`, `cookie` and `peer_cookie` for
@@ -11,9 +11,14 @@
  - `L2tpMessage::emit` checks every attribute and the output buffer size
    before writing anything, so a panic leaves the buffer untouched.
 
+ - Interface names follow the kernel's `dev_valid_name()` rules in
+   `L2tpAttribute::if_name`, emission and parsing: 1 to 15 bytes, not `.` or
+   `..`, and no NUL, `/`, `:` or whitespace bytes. Whitespace includes byte
+   0xa0, as the kernel's `isspace()` does, which rules out characters such
+   as `à`. Empty names were accepted in 0.3.0 and are now rejected.
+
 ### Bug fixes
- - Parsing rejects interface names containing NUL bytes inside the name.
-   NUL padding after the name is still accepted.
+ - NUL padding after an interface name is accepted when parsing.
  - Parsing rejects nonempty payloads on flag and padding attributes.
  - Parsing an unchecked attribute buffer with a malformed header returns an
    error instead of panicking.
@@ -25,6 +30,8 @@
 ### Documentation
  - Document the validation rules and the remaining panicking APIs in the
    README.
+ - Note that storing interface names as `[u8; 16]`, to support names that
+   are not valid UTF-8, is deferred to 0.4.0.
 
 ## [0.3.0] - 2026-10-21
 First release from https://github.com/rust-netlink/netlink-packet-l2tp, a
