@@ -1,5 +1,5 @@
 # Changelog
-## [0.4.0] - Unreleased
+## [0.4.0] - 2026-10-22
 ### Breaking changes
  - `L2tpAttribute::IfName` holds the new `L2tpIfName` instead of a `String`.
    No public API uses `String` for interface names any more.
