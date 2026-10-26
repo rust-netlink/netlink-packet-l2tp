@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 
 use netlink_packet_core::{
-    DecodeError, Emitable, ErrorContext, NlasIterator, Parseable,
-    ParseableParametrized,
+    DecodeError, Emitable, EncodeError, ErrorContext, NlasIterator, Parseable,
+    ParseableParametrized, TryEmit, try_emit_nlas_into,
 };
 use netlink_packet_generic::{GenlFamily, GenlHeader};
 
-use crate::{L2tpAttribute, attribute::emit_validated};
+use crate::L2tpAttribute;
 
 // `L2TP_CMD_*` of the kernel, exposed through the `L2tpCmd` enum, the raw
 // values stay private.
@@ -100,22 +100,25 @@ impl GenlFamily for L2tpMessage {
 
 impl Emitable for L2tpMessage {
     fn emit(&self, buffer: &mut [u8]) {
-        // Validate the entire message before writing any attribute. Public
-        // enum variants can bypass the checked attribute constructors.
-        for attribute in &self.attributes {
-            attribute
-                .validate()
-                .expect("invalid L2TP message attribute");
-        }
-        assert!(
-            buffer.len() >= self.buffer_len(),
-            "L2TP buffer is too small"
-        );
-        emit_validated(&self.attributes, buffer)
+        let data = TryEmit::try_emit(self).expect("invalid L2TP message");
+        buffer[..data.len()].copy_from_slice(&data);
     }
 
     fn buffer_len(&self) -> usize {
-        self.attributes.as_slice().buffer_len()
+        TryEmit::try_emit(self).expect("invalid L2TP message").len()
+    }
+}
+
+impl TryEmit for L2tpMessage {
+    fn try_emit_into(&self, out: &mut Vec<u8>) -> Result<(), EncodeError> {
+        let start = out.len();
+        try_emit_nlas_into(&self.attributes, out)?;
+        let len = out.len() - start;
+        if len > u32::MAX as usize {
+            out.truncate(start);
+            return Err(EncodeError::message_too_long(len, u32::MAX as usize));
+        }
+        Ok(())
     }
 }
 

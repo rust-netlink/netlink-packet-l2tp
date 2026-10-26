@@ -6,8 +6,8 @@ use std::{
 };
 
 use netlink_packet_core::{
-    DefaultNla, Emitable, Nla, NlaBuffer, Parseable, ParseableParametrized,
-    emit_u16,
+    DefaultNla, Emitable, EncodeErrorKind, Nla, NlaBuffer, Parseable,
+    ParseableParametrized, TryEmit, emit_u16,
 };
 use netlink_packet_generic::{GenlFamily, GenlHeader};
 use pretty_assertions::assert_eq;
@@ -894,6 +894,62 @@ fn test_valid_raw_known_attributes_and_future_values_still_emit() {
         attribute.emit(&mut raw);
         assert_eq!(raw, emit_nla(kind, &payload));
     }
+}
+
+#[test]
+fn test_try_emit_returns_encode_error_for_invalid_attributes() {
+    for attribute in [
+        L2tpAttribute::Cookie(vec![0; 1]),
+        L2tpAttribute::PeerCookie(vec![0; 9]),
+        L2tpAttribute::Other(DefaultNla::new(15, vec![0; 3])),
+        L2tpAttribute::Other(DefaultNla::new(8, b"a:b\0".to_vec())),
+        L2tpAttribute::Stats(vec![L2tpStatsAttribute::Other(DefaultNla::new(
+            1,
+            vec![0; 1],
+        ))]),
+    ] {
+        let message = L2tpMessage {
+            cmd: L2tpCmd::SessionCreate,
+            attributes: vec![L2tpAttribute::ConnId(1), attribute],
+        };
+        let error = message.try_emit().unwrap_err();
+        assert_eq!(error.kind(), EncodeErrorKind::InvalidValue);
+    }
+
+    let too_large = L2tpAttribute::Other(DefaultNla::new(100, vec![0; 65532]));
+    let error = too_large.try_emit().unwrap_err();
+    assert_eq!(error.kind(), EncodeErrorKind::TooLarge);
+}
+
+#[test]
+fn test_try_emit_into_restores_buffer_on_error() {
+    let message = L2tpMessage {
+        cmd: L2tpCmd::SessionCreate,
+        attributes: vec![
+            L2tpAttribute::ConnId(1),
+            L2tpAttribute::Cookie(vec![0; 1]),
+        ],
+    };
+    let mut out = vec![0xaa];
+    assert!(message.try_emit_into(&mut out).is_err());
+    assert_eq!(out, vec![0xaa]);
+}
+
+#[test]
+fn test_try_emit_matches_emit_for_valid_message() {
+    let message = L2tpMessage {
+        cmd: L2tpCmd::TunnelCreate,
+        attributes: vec![
+            L2tpAttribute::ConnId(1),
+            L2tpAttribute::PeerConnId(2),
+            L2tpAttribute::IfName(L2tpIfName::new("l2tp0").unwrap()),
+        ],
+    };
+    let fallible = message.try_emit().unwrap();
+    assert_eq!(fallible.len(), message.buffer_len());
+    let mut infallible = vec![0; fallible.len()];
+    message.emit(&mut infallible);
+    assert_eq!(fallible, infallible);
 }
 
 #[test]

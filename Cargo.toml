@@ -14,8 +14,11 @@ readme = "README.md"
 description = "L2TP generic netlink packet definitions"
 
 [dependencies]
-netlink-packet-core = { version = "0.9" }
+netlink-packet-core = { git = "https://github.com/cathay4t/netlink-packet-core" }
 netlink-packet-generic = { version = "0.5" }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
+
+[patch.crates-io]
+netlink-packet-core = { git = "https://github.com/cathay4t/netlink-packet-core" }

@@ -6,7 +6,7 @@ use std::{
     str::{FromStr, Utf8Error},
 };
 
-use netlink_packet_core::DecodeError;
+use netlink_packet_core::{DecodeError, EncodeError};
 
 /// `IFNAMSIZ` of the kernel: the longest interface name plus its NUL.
 const IFNAMSIZ: usize = 16;
@@ -99,10 +99,14 @@ impl L2tpIfName {
         self.len() + 1
     }
 
-    pub(crate) fn emit(&self, buffer: &mut [u8]) {
+    pub(crate) fn try_emit_into(
+        &self,
+        out: &mut Vec<u8>,
+    ) -> Result<(), EncodeError> {
         let len = self.len();
-        buffer[..len].copy_from_slice(&self.0[..len]);
-        buffer[len] = 0;
+        out.extend_from_slice(&self.0[..len]);
+        out.push(0);
+        Ok(())
     }
 }
 

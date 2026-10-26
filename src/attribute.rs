@@ -3,15 +3,13 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use netlink_packet_core::{
-    DecodeError, DefaultNla, Emitable, ErrorContext, NLA_HEADER_SIZE,
-    NLA_TYPE_MASK, Nla, NlaBuffer, NlasIterator, Parseable, emit_i32, emit_u16,
-    emit_u32, emit_u64, parse_i32, parse_u8, parse_u16, parse_u32, parse_u64,
+    DecodeError, DefaultNla, EncodeError, ErrorContext, NLA_MAX_VALUE_LEN,
+    NLA_TYPE_MASK, Nla, NlaBuffer, NlasIterator, Parseable, TryEmit, TryNla,
+    nla_total_size, parse_i32, parse_u8, parse_u16, parse_u32, parse_u64,
+    try_emit_nlas_into,
 };
 
 use crate::L2tpIfName;
-
-// nla_len includes the four-byte header but excludes alignment padding.
-const NLA_MAX_VALUE_LEN: usize = u16::MAX as usize - NLA_HEADER_SIZE;
 
 const L2TP_ATTR_PW_TYPE: u16 = 1;
 const L2TP_ATTR_ENCAP_TYPE: u16 = 2;
@@ -218,63 +216,7 @@ pub enum L2tpAttribute {
 }
 
 impl L2tpAttribute {
-    pub(crate) fn validate(&self) -> Result<(), DecodeError> {
-        match self {
-            Self::Cookie(value) => {
-                validate_cookie_len(value, "L2TP_ATTR_COOKIE")
-            }
-            Self::PeerCookie(value) => {
-                validate_cookie_len(value, "L2TP_ATTR_PEER_COOKIE")
-            }
-            Self::Stats(stats) => {
-                let mut len = 0usize;
-                for stat in stats {
-                    stat.validate()?;
-                    // Each child is bounded before calling buffer_len().
-                    len = len.checked_add(stat.buffer_len()).ok_or_else(
-                        || DecodeError::from("L2TP statistics length overflow"),
-                    )?;
-                    validate_nla_value_len(len)?;
-                }
-                Ok(())
-            }
-            Self::Other(attr) => {
-                validate_nla_value_len(attr.value_len())?;
-                // A raw attribute using a known type must obey the same
-                // validation as its typed counterpart.
-                let kind = attr.kind() & NLA_TYPE_MASK;
-                if (1..=L2TP_ATTR_PAD).contains(&kind) {
-                    let raw = raw_nla(attr);
-                    Self::parse(&NlaBuffer::new_checked(&raw)?)
-                        .and_then(|attr| attr.validate())
-                        .context(format!("invalid raw L2TP NLA type {kind}"))?;
-                }
-                Ok(())
-            }
-            _ => Ok(()),
-        }
-    }
-
-    /// Create a `L2TP_ATTR_COOKIE` attribute after checking its length.
-    pub fn cookie(value: Vec<u8>) -> Result<Self, DecodeError> {
-        validate_cookie_len(&value, "L2TP_ATTR_COOKIE")?;
-        Ok(Self::Cookie(value))
-    }
-
-    /// Create a `L2TP_ATTR_PEER_COOKIE` attribute after checking its length.
-    pub fn peer_cookie(value: Vec<u8>) -> Result<Self, DecodeError> {
-        validate_cookie_len(&value, "L2TP_ATTR_PEER_COOKIE")?;
-        Ok(Self::PeerCookie(value))
-    }
-
-    /// Create a `L2TP_ATTR_IFNAME` attribute, see [`L2tpIfName::new`].
-    pub fn if_name(name: impl AsRef<[u8]>) -> Result<Self, DecodeError> {
-        Ok(Self::IfName(L2tpIfName::new(name)?))
-    }
-}
-
-impl Nla for L2tpAttribute {
-    fn value_len(&self) -> usize {
+    fn value_len_raw(&self) -> Result<usize, EncodeError> {
         let len = match self {
             Self::PwType(_)
             | Self::EncapType(_)
@@ -305,12 +247,163 @@ impl Nla for L2tpAttribute {
             Self::Ip6Saddr(_) | Self::Ip6Daddr(_) => 16,
             Self::Cookie(cookie) | Self::PeerCookie(cookie) => cookie.len(),
             Self::IfName(name) => name.value_len(),
-            Self::Stats(stats) => stats.as_slice().buffer_len(),
+            Self::Stats(stats) => {
+                let mut len = 0usize;
+                for stat in stats {
+                    let stat_len = stat.total_len_raw()?;
+                    len = len.checked_add(stat_len).ok_or_else(|| {
+                        EncodeError::length_overflow("L2TP statistics")
+                    })?;
+                }
+                len
+            }
             Self::UdpZeroCsum6Tx | Self::UdpZeroCsum6Rx | Self::Pad => 0,
-            Self::Other(attr) => attr.value_len(),
+            Self::Other(attr) => Nla::value_len(attr),
         };
-        validate_nla_value_len(len).expect("invalid L2TP attribute length");
-        len
+        if len > NLA_MAX_VALUE_LEN {
+            return Err(EncodeError::nla_value_too_long(
+                TryNla::kind(self),
+                len,
+                NLA_MAX_VALUE_LEN,
+            ));
+        }
+        Ok(len)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), DecodeError> {
+        match self {
+            Self::Cookie(value) => {
+                validate_cookie_len(value, "L2TP_ATTR_COOKIE")
+            }
+            Self::PeerCookie(value) => {
+                validate_cookie_len(value, "L2TP_ATTR_PEER_COOKIE")
+            }
+            Self::Stats(stats) => {
+                let mut len = 0usize;
+                for stat in stats {
+                    stat.validate()?;
+                    let stat_len = stat
+                        .total_len_raw()
+                        .map_err(|e| DecodeError::from(e.to_string()))?;
+                    len = len.checked_add(stat_len).ok_or_else(|| {
+                        DecodeError::from("L2TP statistics length overflow")
+                    })?;
+                    validate_nla_value_len(len)?;
+                }
+                Ok(())
+            }
+            Self::Other(attr) => {
+                // A raw attribute using a known type must obey the same
+                // validation as its typed counterpart.
+                let kind = TryNla::kind(attr) & NLA_TYPE_MASK;
+                if (1..=L2TP_ATTR_PAD).contains(&kind) {
+                    let raw = raw_nla(attr)
+                        .map_err(|e| DecodeError::from(e.to_string()))?;
+                    Self::parse(&NlaBuffer::new_checked(&raw)?)
+                        .and_then(|attr| attr.validate())
+                        .context(format!("invalid raw L2TP NLA type {kind}"))?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Create a `L2TP_ATTR_COOKIE` attribute after checking its length.
+    pub fn cookie(value: Vec<u8>) -> Result<Self, DecodeError> {
+        validate_cookie_len(&value, "L2TP_ATTR_COOKIE")?;
+        Ok(Self::Cookie(value))
+    }
+
+    /// Create a `L2TP_ATTR_PEER_COOKIE` attribute after checking its length.
+    pub fn peer_cookie(value: Vec<u8>) -> Result<Self, DecodeError> {
+        validate_cookie_len(&value, "L2TP_ATTR_PEER_COOKIE")?;
+        Ok(Self::PeerCookie(value))
+    }
+
+    /// Create a `L2TP_ATTR_IFNAME` attribute, see [`L2tpIfName::new`].
+    pub fn if_name(name: impl AsRef<[u8]>) -> Result<Self, DecodeError> {
+        Ok(Self::IfName(L2tpIfName::new(name)?))
+    }
+}
+
+impl Nla for L2tpAttribute {
+    fn value_len(&self) -> usize {
+        self.value_len_raw().expect("invalid L2TP attribute length")
+    }
+
+    fn kind(&self) -> u16 {
+        TryNla::kind(self)
+    }
+
+    fn emit_value(&self, buffer: &mut [u8]) {
+        let mut out = Vec::new();
+        TryNla::try_emit_value_into(self, &mut out).unwrap();
+        buffer[..out.len()].copy_from_slice(&out);
+    }
+}
+
+impl TryNla for L2tpAttribute {
+    fn try_emit_value_into(
+        &self,
+        out: &mut Vec<u8>,
+    ) -> Result<(), EncodeError> {
+        self.validate()
+            .map_err(|e| EncodeError::invalid_value("L2TP attribute", e))?;
+        match self {
+            Self::Offset(value)
+            | Self::VlanId(value)
+            | Self::UdpSport(value)
+            | Self::UdpDport(value)
+            | Self::Mtu(value)
+            | Self::Mru(value) => {
+                out.extend_from_slice(&(*value).to_ne_bytes());
+            }
+            Self::PwType(value) => {
+                out.extend_from_slice(&u16::from(*value).to_ne_bytes());
+            }
+            Self::EncapType(value) => {
+                out.extend_from_slice(&u16::from(*value).to_ne_bytes());
+            }
+            Self::DataSeq(value)
+            | Self::L2SpecType(value)
+            | Self::L2SpecLen(value)
+            | Self::ProtoVersion(value)
+            | Self::UdpCsum(value)
+            | Self::RecvSeq(value)
+            | Self::SendSeq(value)
+            | Self::LnsMode(value)
+            | Self::UsingIpsec(value) => out.push(*value),
+            Self::ConnId(value)
+            | Self::PeerConnId(value)
+            | Self::SessionId(value)
+            | Self::PeerSessionId(value)
+            | Self::Debug(value) => {
+                out.extend_from_slice(&(*value).to_ne_bytes());
+            }
+            Self::RecvTimeout(value) => {
+                out.extend_from_slice(&(*value).to_ne_bytes());
+            }
+            Self::Fd(value) => {
+                out.extend_from_slice(&(*value).to_ne_bytes());
+            }
+            Self::IpSaddr(value) | Self::IpDaddr(value) => {
+                out.extend_from_slice(&value.octets());
+            }
+            Self::Ip6Saddr(value) | Self::Ip6Daddr(value) => {
+                out.extend_from_slice(&value.octets());
+            }
+            Self::Cookie(cookie) | Self::PeerCookie(cookie) => {
+                out.extend_from_slice(cookie);
+            }
+            Self::IfName(name) => name.try_emit_into(out)?,
+            Self::Stats(stats) => try_emit_nlas_into(stats, out)?,
+            Self::UdpZeroCsum6Tx | Self::UdpZeroCsum6Rx | Self::Pad => {}
+            Self::Other(attr) => {
+                TryNla::try_emit_value_into(attr, out)?;
+            }
+        }
+        Ok(())
     }
 
     fn kind(&self) -> u16 {
@@ -350,58 +443,7 @@ impl Nla for L2tpAttribute {
             Self::UdpZeroCsum6Tx => L2TP_ATTR_UDP_ZERO_CSUM6_TX,
             Self::UdpZeroCsum6Rx => L2TP_ATTR_UDP_ZERO_CSUM6_RX,
             Self::Pad => L2TP_ATTR_PAD,
-            Self::Other(attr) => attr.kind(),
-        }
-    }
-
-    fn emit_value(&self, buffer: &mut [u8]) {
-        self.validate().expect("invalid L2TP attribute");
-        self.emit_validated_value(buffer)
-    }
-}
-
-impl EmitValidated for L2tpAttribute {
-    fn emit_validated_value(&self, buffer: &mut [u8]) {
-        match self {
-            Self::Offset(value)
-            | Self::VlanId(value)
-            | Self::UdpSport(value)
-            | Self::UdpDport(value)
-            | Self::Mtu(value)
-            | Self::Mru(value) => emit_u16(buffer, *value).unwrap(),
-            Self::PwType(value) => emit_u16(buffer, (*value).into()).unwrap(),
-            Self::EncapType(value) => {
-                emit_u16(buffer, (*value).into()).unwrap()
-            }
-            Self::DataSeq(value)
-            | Self::L2SpecType(value)
-            | Self::L2SpecLen(value)
-            | Self::ProtoVersion(value)
-            | Self::UdpCsum(value)
-            | Self::RecvSeq(value)
-            | Self::SendSeq(value)
-            | Self::LnsMode(value)
-            | Self::UsingIpsec(value) => buffer[0] = *value,
-            Self::ConnId(value)
-            | Self::PeerConnId(value)
-            | Self::SessionId(value)
-            | Self::PeerSessionId(value)
-            | Self::Debug(value) => emit_u32(buffer, *value).unwrap(),
-            Self::RecvTimeout(value) => emit_u64(buffer, *value).unwrap(),
-            Self::Fd(value) => emit_i32(buffer, *value).unwrap(),
-            Self::IpSaddr(value) | Self::IpDaddr(value) => {
-                buffer.copy_from_slice(&value.octets())
-            }
-            Self::Ip6Saddr(value) | Self::Ip6Daddr(value) => {
-                buffer.copy_from_slice(&value.octets())
-            }
-            Self::Cookie(cookie) | Self::PeerCookie(cookie) => {
-                buffer.copy_from_slice(cookie)
-            }
-            Self::IfName(name) => name.emit(buffer),
-            Self::Stats(stats) => emit_validated(stats, buffer),
-            Self::UdpZeroCsum6Tx | Self::UdpZeroCsum6Rx | Self::Pad => (),
-            Self::Other(attr) => attr.emit_value(buffer),
+            Self::Other(attr) => TryNla::kind(attr),
         }
     }
 }
@@ -556,23 +598,7 @@ pub enum L2tpStatsAttribute {
 }
 
 impl L2tpStatsAttribute {
-    fn validate(&self) -> Result<(), DecodeError> {
-        if let Self::Other(attr) = self {
-            validate_nla_value_len(attr.value_len())?;
-            let kind = attr.kind() & NLA_TYPE_MASK;
-            if (1..=L2TP_ATTR_RX_INVALID).contains(&kind) {
-                let raw = raw_nla(attr);
-                Self::parse(&NlaBuffer::new_checked(&raw)?).context(
-                    format!("invalid raw L2TP stats NLA type {kind}"),
-                )?;
-            }
-        }
-        Ok(())
-    }
-}
-
-impl Nla for L2tpStatsAttribute {
-    fn value_len(&self) -> usize {
+    fn value_len_raw(&self) -> Result<usize, EncodeError> {
         let len = match self {
             Self::TxPackets(_)
             | Self::TxBytes(_)
@@ -585,10 +611,81 @@ impl Nla for L2tpStatsAttribute {
             | Self::RxCookieDiscards(_)
             | Self::RxInvalid(_) => 8,
             Self::Pad => 0,
-            Self::Other(attr) => attr.value_len(),
+            Self::Other(attr) => Nla::value_len(attr),
         };
-        validate_nla_value_len(len).expect("invalid L2TP statistics length");
-        len
+        if len > NLA_MAX_VALUE_LEN {
+            return Err(EncodeError::nla_value_too_long(
+                TryNla::kind(self),
+                len,
+                NLA_MAX_VALUE_LEN,
+            ));
+        }
+        Ok(len)
+    }
+
+    fn total_len_raw(&self) -> Result<usize, EncodeError> {
+        nla_total_size(self.value_len_raw()?)
+    }
+
+    fn validate(&self) -> Result<(), DecodeError> {
+        if let Self::Other(attr) = self {
+            let kind = TryNla::kind(attr) & NLA_TYPE_MASK;
+            if (1..=L2TP_ATTR_RX_INVALID).contains(&kind) {
+                let raw = raw_nla(attr)
+                    .map_err(|e| DecodeError::from(e.to_string()))?;
+                Self::parse(&NlaBuffer::new_checked(&raw)?).context(
+                    format!("invalid raw L2TP stats NLA type {kind}"),
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Nla for L2tpStatsAttribute {
+    fn value_len(&self) -> usize {
+        self.value_len_raw()
+            .expect("invalid L2TP statistics length")
+    }
+
+    fn kind(&self) -> u16 {
+        TryNla::kind(self)
+    }
+
+    fn emit_value(&self, buffer: &mut [u8]) {
+        let mut out = Vec::new();
+        TryNla::try_emit_value_into(self, &mut out).unwrap();
+        buffer[..out.len()].copy_from_slice(&out);
+    }
+}
+
+impl TryNla for L2tpStatsAttribute {
+    fn try_emit_value_into(
+        &self,
+        out: &mut Vec<u8>,
+    ) -> Result<(), EncodeError> {
+        self.validate().map_err(|e| {
+            EncodeError::invalid_value("L2TP statistics attribute", e)
+        })?;
+        match self {
+            Self::TxPackets(value)
+            | Self::TxBytes(value)
+            | Self::TxErrors(value)
+            | Self::RxPackets(value)
+            | Self::RxBytes(value)
+            | Self::RxSeqDiscards(value)
+            | Self::RxOosPackets(value)
+            | Self::RxErrors(value)
+            | Self::RxCookieDiscards(value)
+            | Self::RxInvalid(value) => {
+                out.extend_from_slice(&(*value).to_ne_bytes());
+            }
+            Self::Pad => {}
+            Self::Other(attr) => {
+                TryNla::try_emit_value_into(attr, out)?;
+            }
+        }
+        Ok(())
     }
 
     fn kind(&self) -> u16 {
@@ -604,31 +701,7 @@ impl Nla for L2tpStatsAttribute {
             Self::RxCookieDiscards(_) => L2TP_ATTR_RX_COOKIE_DISCARDS,
             Self::RxInvalid(_) => L2TP_ATTR_RX_INVALID,
             Self::Pad => L2TP_ATTR_STATS_PAD,
-            Self::Other(attr) => attr.kind(),
-        }
-    }
-
-    fn emit_value(&self, buffer: &mut [u8]) {
-        self.validate().expect("invalid L2TP statistics attribute");
-        self.emit_validated_value(buffer)
-    }
-}
-
-impl EmitValidated for L2tpStatsAttribute {
-    fn emit_validated_value(&self, buffer: &mut [u8]) {
-        match self {
-            Self::TxPackets(value)
-            | Self::TxBytes(value)
-            | Self::TxErrors(value)
-            | Self::RxPackets(value)
-            | Self::RxBytes(value)
-            | Self::RxSeqDiscards(value)
-            | Self::RxOosPackets(value)
-            | Self::RxErrors(value)
-            | Self::RxCookieDiscards(value)
-            | Self::RxInvalid(value) => emit_u64(buffer, *value).unwrap(),
-            Self::Pad => (),
-            Self::Other(attr) => attr.emit_value(buffer),
+            Self::Other(attr) => TryNla::kind(attr),
         }
     }
 }
@@ -685,38 +758,6 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
     }
 }
 
-// Emits the value of an attribute the caller has already validated, so
-// message and nested emission do not repeat the checks of `emit_value`.
-pub(crate) trait EmitValidated: Nla {
-    fn emit_validated_value(&self, buffer: &mut [u8]);
-}
-
-struct Validated<'a, T>(&'a T);
-
-impl<T: EmitValidated> Nla for Validated<'_, T> {
-    fn value_len(&self) -> usize {
-        self.0.value_len()
-    }
-
-    fn kind(&self) -> u16 {
-        self.0.kind()
-    }
-
-    fn emit_value(&self, buffer: &mut [u8]) {
-        self.0.emit_validated_value(buffer)
-    }
-}
-
-/// Same as `<&[T] as Emitable>::emit`, skipping per-attribute validation.
-pub(crate) fn emit_validated<T: EmitValidated>(nlas: &[T], buffer: &mut [u8]) {
-    let mut start = 0;
-    for nla in nlas {
-        let end = start + nla.buffer_len();
-        Validated(nla).emit(&mut buffer[start..end]);
-        start = end;
-    }
-}
-
 fn validate_nla_value_len(len: usize) -> Result<(), DecodeError> {
     if len > NLA_MAX_VALUE_LEN {
         Err(DecodeError::from(format!(
@@ -738,15 +779,12 @@ fn validate_empty(payload: &[u8], name: &str) -> Result<(), DecodeError> {
     }
 }
 
-// Only called after checking the value length. Write the header explicitly
-// so raw attributes with flags are validated without changing those flags.
-fn raw_nla(attr: &DefaultNla) -> Vec<u8> {
-    let len = NLA_HEADER_SIZE + attr.value_len();
-    let mut raw = vec![0; len];
-    emit_u16(&mut raw[..2], len as u16).unwrap();
-    emit_u16(&mut raw[2..4], attr.kind()).unwrap();
-    attr.emit_value(&mut raw[NLA_HEADER_SIZE..]);
-    raw
+// Only called after checking the value length. Using the fallible emitter
+// preserves the raw attribute flags without changing them.
+fn raw_nla(attr: &DefaultNla) -> Result<Vec<u8>, EncodeError> {
+    let mut raw = Vec::new();
+    TryEmit::try_emit_into(attr, &mut raw)?;
+    Ok(raw)
 }
 
 fn parse_cookie(
