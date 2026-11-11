@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 
 use netlink_packet_core::{
-    DecodeError, Emitable, ErrorContext, NlasIterator, Parseable,
+    DecodeError, Emitable, EncodeError, ErrorContext, NlasIterator, Parseable,
     ParseableParametrized,
 };
 use netlink_packet_generic::{GenlFamily, GenlHeader};
 
-use crate::{L2tpAttribute, attribute::emit_validated};
+use crate::L2tpAttribute;
 
 // `L2TP_CMD_*` of the kernel, exposed through the `L2tpCmd` enum, the raw
 // values stay private.
@@ -99,23 +99,8 @@ impl GenlFamily for L2tpMessage {
 }
 
 impl Emitable for L2tpMessage {
-    fn emit(&self, buffer: &mut [u8]) {
-        // Validate the entire message before writing any attribute. Public
-        // enum variants can bypass the checked attribute constructors.
-        for attribute in &self.attributes {
-            attribute
-                .validate()
-                .expect("invalid L2TP message attribute");
-        }
-        assert!(
-            buffer.len() >= self.buffer_len(),
-            "L2TP buffer is too small"
-        );
-        emit_validated(&self.attributes, buffer)
-    }
-
-    fn buffer_len(&self) -> usize {
-        self.attributes.as_slice().buffer_len()
+    fn emit_value(&self, out: &mut Vec<u8>) -> Result<(), EncodeError> {
+        self.attributes.as_slice().emit(out)
     }
 }
 
@@ -134,9 +119,8 @@ impl ParseableParametrized<[u8], GenlHeader> for L2tpMessage {
 fn parse_attributes(buf: &[u8]) -> Result<Vec<L2tpAttribute>, DecodeError> {
     let mut attributes = Vec::new();
     let error_msg = "failed to parse l2tp netlink attributes";
-    for nla in NlasIterator::new(buf) {
-        let nla = &nla.context(error_msg)?;
-        attributes.push(L2tpAttribute::parse(nla)?);
+    for nla in NlasIterator::new(buf)? {
+        attributes.push(L2tpAttribute::parse(&nla).context(error_msg)?);
     }
     Ok(attributes)
 }
