@@ -14,8 +14,8 @@ readme = "README.md"
 description = "L2TP generic netlink packet definitions"
 
 [dependencies]
-netlink-packet-core = { version = "0.9" }
-netlink-packet-generic = { version = "0.5" }
+netlink-packet-core = "1.0.0-rc1"
+netlink-packet-generic = { git = "https://github.com/rust-netlink/netlink-packet-generic", branch = "main" }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"

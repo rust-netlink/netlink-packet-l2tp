@@ -7,7 +7,6 @@ use std::{
 
 use netlink_packet_core::{
     DefaultNla, Emitable, Nla, NlaBuffer, Parseable, ParseableParametrized,
-    emit_u16,
 };
 use netlink_packet_generic::{GenlFamily, GenlHeader};
 use pretty_assertions::assert_eq;
@@ -26,9 +25,9 @@ fn assert_parse_and_emit(raw: &[u8], expected: &L2tpMessage) {
         expected
     );
 
-    let mut buffer = vec![0; expected.buffer_len() + 4];
-    header.emit(&mut buffer);
-    expected.emit(&mut buffer[4..]);
+    let mut buffer = Vec::new();
+    header.emit(&mut buffer).unwrap();
+    expected.emit(&mut buffer).unwrap();
     assert_eq!(&buffer, &raw);
 }
 
@@ -365,7 +364,7 @@ fn test_parse_cookie_validates_length() {
     for len in [0usize, 4, 8] {
         for kind in [15u16, 16] {
             let raw = emit_nla(kind, &vec![0; len]);
-            let nla = NlaBuffer::new_checked(&raw).unwrap();
+            let nla = NlaBuffer::new(&raw).unwrap();
             assert!(L2tpAttribute::parse(&nla).is_ok());
         }
     }
@@ -373,7 +372,7 @@ fn test_parse_cookie_validates_length() {
     for len in [1usize, 2, 3, 5, 6, 7, 9] {
         for kind in [15u16, 16] {
             let raw = emit_nla(kind, &vec![0; len]);
-            let nla = NlaBuffer::new_checked(&raw).unwrap();
+            let nla = NlaBuffer::new(&raw).unwrap();
             assert!(L2tpAttribute::parse(&nla).is_err());
         }
     }
@@ -438,13 +437,13 @@ fn test_parse_ifname_validates_length() {
     let mut value = "x".repeat(15).into_bytes();
     value.push(0);
     let raw = emit_nla(8, &value);
-    let nla = NlaBuffer::new_checked(&raw).unwrap();
+    let nla = NlaBuffer::new(&raw).unwrap();
     assert!(L2tpAttribute::parse(&nla).is_ok());
 
     let mut value = "x".repeat(16).into_bytes();
     value.push(0);
     let raw = emit_nla(8, &value);
-    let nla = NlaBuffer::new_checked(&raw).unwrap();
+    let nla = NlaBuffer::new(&raw).unwrap();
     assert!(L2tpAttribute::parse(&nla).is_err());
 }
 
@@ -614,7 +613,7 @@ fn test_parse_ifname_reads_a_c_string() {
             }
             let raw = emit_nla(8, &payload);
             assert_eq!(
-                L2tpAttribute::parse(&NlaBuffer::new(&raw)).unwrap(),
+                L2tpAttribute::parse(&NlaBuffer::new(&raw).unwrap()).unwrap(),
                 L2tpAttribute::if_name(name).unwrap()
             );
         }
@@ -631,7 +630,7 @@ fn test_parse_ifname_reads_a_c_string() {
     ] {
         let raw = emit_nla(8, payload);
         assert_eq!(
-            L2tpAttribute::parse(&NlaBuffer::new(&raw)).unwrap(),
+            L2tpAttribute::parse(&NlaBuffer::new(&raw).unwrap()).unwrap(),
             L2tpAttribute::if_name(name).unwrap(),
             "{}",
             payload.escape_ascii()
@@ -649,7 +648,7 @@ fn test_parse_ifname_reads_a_c_string() {
     ] {
         let raw = emit_nla(8, payload);
         assert!(
-            L2tpAttribute::parse(&NlaBuffer::new(&raw)).is_err(),
+            L2tpAttribute::parse(&NlaBuffer::new(&raw).unwrap()).is_err(),
             "{}",
             payload.escape_ascii()
         );
@@ -668,7 +667,7 @@ fn test_ifname_follows_kernel_dev_valid_name() {
         assert!(L2tpAttribute::if_name(name).is_err(), "{name:?}");
         let raw = emit_nla(8, name.as_bytes());
         assert!(
-            L2tpAttribute::parse(&NlaBuffer::new(&raw)).is_err(),
+            L2tpAttribute::parse(&NlaBuffer::new(&raw).unwrap()).is_err(),
             "{name:?}"
         );
     }
@@ -683,11 +682,11 @@ fn test_ifname_supports_non_utf8_names() {
     assert_eq!(format!("{name:?}"), r#"L2tpIfName("eth\xff")"#);
 
     let attribute = L2tpAttribute::IfName(name);
-    let mut raw = vec![0; attribute.buffer_len()];
-    attribute.emit(&mut raw);
+    let mut raw = Vec::new();
+    attribute.emit(&mut raw).unwrap();
     assert_eq!(raw, emit_nla(8, b"eth\xff\0"));
     assert_eq!(
-        L2tpAttribute::parse(&NlaBuffer::new(&raw)).unwrap(),
+        L2tpAttribute::parse(&NlaBuffer::new(&raw).unwrap()).unwrap(),
         attribute
     );
 }
@@ -761,11 +760,10 @@ fn test_invalid_public_variants_are_rejected_before_message_writes() {
             attributes: vec![L2tpAttribute::ConnId(1), attribute],
         };
         let mut buffer = vec![0xa5; 70000];
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                message.emit(&mut buffer)
-            }));
-        assert!(result.is_err(), "accepted invalid message: {message:?}");
+        assert!(
+            message.emit(&mut buffer).is_err(),
+            "accepted invalid message: {message:?}"
+        );
         assert!(buffer.iter().all(|byte| *byte == 0xa5));
     }
 }
@@ -777,19 +775,10 @@ fn test_direct_attribute_emission_rejects_invalid_variants() {
         L2tpAttribute::PeerCookie(vec![0; 5]),
         L2tpAttribute::Other(DefaultNla::new(15, vec![0; 3])),
     ] {
-        let result = std::panic::catch_unwind(|| {
-            let mut buffer = vec![0; attribute.buffer_len()];
-            attribute.emit(&mut buffer);
-        });
-        assert!(result.is_err());
+        assert!(attribute.emit(&mut Vec::new()).is_err());
     }
     let stat = L2tpStatsAttribute::Other(DefaultNla::new(9, vec![0]));
-    assert!(
-        std::panic::catch_unwind(|| {
-            stat.emit(&mut vec![0; stat.buffer_len()]);
-        })
-        .is_err()
-    );
+    assert!(stat.emit(&mut Vec::new()).is_err());
 }
 
 #[test]
@@ -797,29 +786,29 @@ fn test_attribute_length_limits_include_header_but_not_padding() {
     for len in [65530, 65531] {
         let attribute =
             L2tpAttribute::Other(DefaultNla::new(100, vec![42; len]));
-        let mut raw = vec![0; attribute.buffer_len()];
-        attribute.emit(&mut raw);
+        let mut raw = Vec::new();
+        attribute.emit(&mut raw).unwrap();
         assert_eq!(raw.len(), 65536);
         assert_eq!(
-            L2tpAttribute::parse(&NlaBuffer::new_checked(&raw).unwrap())
-                .unwrap(),
+            L2tpAttribute::parse(&NlaBuffer::new(&raw).unwrap()).unwrap(),
             attribute
         );
         let stat =
             L2tpStatsAttribute::Other(DefaultNla::new(100, vec![42; len]));
-        stat.emit(&mut raw);
+        let mut raw = Vec::new();
+        stat.emit(&mut raw).unwrap();
         assert_eq!(
-            L2tpStatsAttribute::parse(&NlaBuffer::new(&raw)).unwrap(),
+            L2tpStatsAttribute::parse(&NlaBuffer::new(&raw).unwrap()).unwrap(),
             stat
         );
     }
     for len in [65532, 65535, 65536] {
         let attribute =
             L2tpAttribute::Other(DefaultNla::new(100, vec![0; len]));
-        assert!(std::panic::catch_unwind(|| attribute.value_len()).is_err());
+        assert!(attribute.emit(&mut Vec::new()).is_err());
         let stat =
             L2tpStatsAttribute::Other(DefaultNla::new(100, vec![0; len]));
-        assert!(std::panic::catch_unwind(|| stat.value_len()).is_err());
+        assert!(stat.emit(&mut Vec::new()).is_err());
     }
 }
 
@@ -829,18 +818,17 @@ fn test_stats_length_limit_includes_aligned_children() {
         let attribute = L2tpAttribute::Stats(vec![L2tpStatsAttribute::Other(
             DefaultNla::new(100, vec![42; len]),
         )]);
+        let mut raw = Vec::new();
+        let result = attribute.emit(&mut raw);
         if len <= 65524 {
-            let mut raw = vec![0; attribute.buffer_len()];
-            attribute.emit(&mut raw);
+            result.unwrap();
             assert_eq!(raw.len(), 65532);
             assert_eq!(
-                L2tpAttribute::parse(&NlaBuffer::new(&raw)).unwrap(),
+                L2tpAttribute::parse(&NlaBuffer::new(&raw).unwrap()).unwrap(),
                 attribute
             );
         } else {
-            assert!(
-                std::panic::catch_unwind(|| attribute.value_len()).is_err()
-            );
+            assert!(result.is_err());
         }
     }
 }
@@ -854,9 +842,10 @@ fn test_parsers_reject_unchecked_malformed_nla_headers_without_panicking() {
         vec![3, 0, 1, 0],
         vec![8, 0, 1, 0],
     ] {
-        let nla = NlaBuffer::new(&raw);
-        assert!(L2tpAttribute::parse(&nla).is_err());
-        assert!(L2tpStatsAttribute::parse(&nla).is_err());
+        if let Ok(nla) = NlaBuffer::new(&raw) {
+            assert!(L2tpAttribute::parse(&nla).is_err());
+            assert!(L2tpStatsAttribute::parse(&nla).is_err());
+        }
     }
 }
 
@@ -864,15 +853,15 @@ fn test_parsers_reject_unchecked_malformed_nla_headers_without_panicking() {
 fn test_flags_and_padding_reject_nonempty_payloads() {
     for kind in [33, 34, 35] {
         let raw = emit_nla(kind, &[0]);
-        assert!(L2tpAttribute::parse(&NlaBuffer::new(&raw)).is_err());
+        assert!(L2tpAttribute::parse(&NlaBuffer::new(&raw).unwrap()).is_err());
         let raw = emit_nla(kind, &[]);
-        assert!(L2tpAttribute::parse(&NlaBuffer::new(&raw)).is_ok());
+        assert!(L2tpAttribute::parse(&NlaBuffer::new(&raw).unwrap()).is_ok());
     }
     let raw = emit_nla(9, &[0]);
-    assert!(L2tpStatsAttribute::parse(&NlaBuffer::new(&raw)).is_err());
+    assert!(L2tpStatsAttribute::parse(&NlaBuffer::new(&raw).unwrap()).is_err());
     let raw = emit_nla(9, &[]);
     assert_eq!(
-        L2tpStatsAttribute::parse(&NlaBuffer::new(&raw)).unwrap(),
+        L2tpStatsAttribute::parse(&NlaBuffer::new(&raw).unwrap()).unwrap(),
         L2tpStatsAttribute::Pad
     );
 }
@@ -890,37 +879,16 @@ fn test_valid_raw_known_attributes_and_future_values_still_emit() {
     ] {
         let attribute =
             L2tpAttribute::Other(DefaultNla::new(kind, payload.clone()));
-        let mut raw = vec![0; attribute.buffer_len()];
-        attribute.emit(&mut raw);
+        let mut raw = Vec::new();
+        attribute.emit(&mut raw).unwrap();
         assert_eq!(raw, emit_nla(kind, &payload));
     }
 }
 
-#[test]
-fn test_short_message_output_buffer_is_rejected_before_writing() {
-    let message = L2tpMessage {
-        cmd: L2tpCmd::TunnelCreate,
-        attributes: vec![
-            L2tpAttribute::ConnId(1),
-            L2tpAttribute::PeerConnId(2),
-        ],
-    };
-    let mut buffer = vec![0xa5; message.buffer_len() - 1];
-    assert!(
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            message.emit(&mut buffer);
-        }))
-        .is_err()
-    );
-    assert!(buffer.iter().all(|byte| *byte == 0xa5));
-}
-
 fn emit_nla(kind: u16, value: &[u8]) -> Vec<u8> {
-    let len = 4 + value.len();
-    let aligned_len = (len + 3) & !3;
-    let mut raw = vec![0u8; aligned_len];
-    emit_u16(&mut raw[0..2], len as u16).unwrap();
-    emit_u16(&mut raw[2..4], kind).unwrap();
-    raw[4..(4 + value.len())].copy_from_slice(value);
+    let mut raw = Vec::new();
+    DefaultNla::new(kind, value.to_vec())
+        .emit(&mut raw)
+        .unwrap();
     raw
 }

@@ -94,15 +94,10 @@ impl L2tpIfName {
         Self::new(c_string(payload))
     }
 
-    // Length of the attribute value, the name plus its terminating NUL.
-    pub(crate) fn value_len(&self) -> usize {
-        self.len() + 1
-    }
-
-    pub(crate) fn emit(&self, buffer: &mut [u8]) {
+    pub(crate) fn append_to(&self, out: &mut Vec<u8>) {
         let len = self.len();
-        buffer[..len].copy_from_slice(&self.0[..len]);
-        buffer[len] = 0;
+        out.extend_from_slice(&self.0[..len]);
+        out.push(0);
     }
 }
 
