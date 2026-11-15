@@ -15,7 +15,7 @@ description = "L2TP generic netlink packet definitions"
 
 [dependencies]
 netlink-packet-core = "1.0.0-rc2"
-netlink-packet-generic = "1.0.0-rc1"
+netlink-packet-generic = "1.0.0-rc2"
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
